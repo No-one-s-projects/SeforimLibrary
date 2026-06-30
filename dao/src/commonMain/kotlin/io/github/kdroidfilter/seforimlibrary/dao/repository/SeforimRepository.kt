@@ -2573,7 +2573,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
      */
     suspend fun getDefaultCommentatorsForBook(bookId: Long): List<Pair<Long, Int>> =
         withContext(Dispatchers.IO) {
-            database.defaultCommentatorQueriesQueries.selectByBookId(bookId)
+            database.defaultCommentatorQueriesQueries.selectByBookIdWithPosition(bookId)
                 .executeAsList()
                 .map { it.commentatorBookId to it.position.toInt() }
         }
