@@ -165,7 +165,8 @@ class DatabaseGenerator(
     private data class CategoryPlacement(
         val id: Long,
         val leafLevel: Int,
-        val normalizedPath: List<String>
+        val normalizedPath: List<String>,
+        val canonicalPath: String
     )
 
     private suspend fun findExistingCategory(parentId: Long?, title: String): Category? {
@@ -174,12 +175,13 @@ class DatabaseGenerator(
         return candidates.firstOrNull { comparableLabel(it.title) == targetKey }
     }
 
-    private suspend fun ensureCategoryHierarchy(rawTitle: String, parentId: Long?, startLevel: Int): CategoryPlacement {
+    private suspend fun ensureCategoryHierarchy(rawTitle: String, parentId: Long?, startLevel: Int, parentPath: String): CategoryPlacement {
         val normalizedSegments = normalizeCategorySegments(rawTitle)
         var currentParent = parentId
         var currentLevel = startLevel
         var lastId: Long? = null
-        val pathSoFar = StringBuilder()
+        // Key by full path from root, not leaf name: same-named leaves under different parents must not collide.
+        val pathSoFar = StringBuilder(parentPath)
 
         for (title in normalizedSegments) {
             if (pathSoFar.isNotEmpty()) pathSoFar.append('/')
@@ -201,7 +203,8 @@ class DatabaseGenerator(
         return CategoryPlacement(
             id = finalId,
             leafLevel = currentLevel - 1,
-            normalizedPath = normalizedSegments
+            normalizedPath = normalizedSegments,
+            canonicalPath = pathSoFar.toString()
         )
     }
 
@@ -675,7 +678,8 @@ class DatabaseGenerator(
         directory: Path,
         parentCategoryId: Long?,
         level: Int,
-        metadata: Map<String, BookMetadata>
+        metadata: Map<String, BookMetadata>,
+        parentPath: String = ""
     ) {
         logger.i { "=== Processing directory: ${directory.fileName} with parentCategoryId: $parentCategoryId (level: $level) ===" }
 
@@ -690,10 +694,10 @@ class DatabaseGenerator(
                 when {
                     Files.isDirectory(entry) -> {
                         logger.d { "Processing subdirectory: ${entry.fileName} with parentId: $parentCategoryId" }
-                        val placement = ensureCategoryHierarchy(entry.fileName.toString(), parentCategoryId, level)
+                        val placement = ensureCategoryHierarchy(entry.fileName.toString(), parentCategoryId, level, parentPath)
                         val normalizedPath = placement.normalizedPath.joinToString(" / ")
                         logger.i { "✅ Category '${entry.fileName}' normalized to '$normalizedPath' with ID: ${placement.id} (parent: $parentCategoryId)" }
-                        processDirectory(entry, placement.id, placement.leafLevel + 1, metadata)
+                        processDirectory(entry, placement.id, placement.leafLevel + 1, metadata, placement.canonicalPath)
                     }
 
                     Files.isRegularFile(entry) && entry.extension == "txt" -> {
@@ -1166,10 +1170,12 @@ class DatabaseGenerator(
             // Ensure categories exist and get the final parent category id
             var parentId: Long? = null
             var level = 0
+            var parentPath = ""
             for (cat in categories) {
-                val placement = ensureCategoryHierarchy(cat, parentId, level)
+                val placement = ensureCategoryHierarchy(cat, parentId, level, parentPath)
                 parentId = placement.id
                 level = placement.leafLevel + 1
+                parentPath = placement.canonicalPath
             }
 
             if (parentId == null) {
