@@ -38,8 +38,8 @@ data class Book(
     val pubDates: List<PubDate> = emptyList(),
     val heShortDesc: String? = null,
     val heDesc: String? = null,
-    // Optional notes content: when a companion file named "הערות על <title>" exists,
-    // its content is attached here instead of being inserted as a separate book.
+    // Legacy column, no longer populated: "הערות על <title>" files are imported
+    // as standalone books linked via links/*.json.
     val notesContent: String? = null,
     val order: Float = 999f,
     val totalLines: Int = 0,

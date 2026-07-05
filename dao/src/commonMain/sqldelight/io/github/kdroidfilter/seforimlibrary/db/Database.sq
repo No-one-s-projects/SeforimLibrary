@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS book (
     heShortDesc TEXT,
     -- Full (long) description in Hebrew. heShortDesc holds the one-line summary.
     heDesc TEXT,
-    -- Optional raw notes attached to the base book (when a companion file 'הערות על <title>' exists)
+    -- Legacy, no longer populated: 'הערות על <title>' files are standalone linked books
     notesContent TEXT,
     orderIndex INTEGER NOT NULL DEFAULT 999,
     totalLines INTEGER NOT NULL DEFAULT 0,

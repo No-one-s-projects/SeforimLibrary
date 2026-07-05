@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
+import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
@@ -69,12 +70,14 @@ fun main(args: Array<String>) = runBlocking {
         val hearotLinksCreated = generateHavroutaHearotLinks(repository, bindings, logger, sourceDir)
         logger.i { "Havrouta-Hearot link generation completed. Created $hearotLinksCreated links." }
 
+        // Must run before the transitive step: transitive Talmud→Hearot links are
+        // not base→hearot relationships and must not become default commentators.
+        logger.i { "Setting Hearot as default commentators for their base books..." }
+        setHearotAsDefaultCommentators(repository, driver, logger)
+
         logger.i { "Creating transitive Talmud-Hearot links..." }
         val transitiveLinksCreated = generateTalmudHearotTransitiveLinks(repository, bindings, logger)
         logger.i { "Transitive Talmud-Hearot link generation completed. Created $transitiveLinksCreated links." }
-
-        logger.i { "Setting Hearot as default commentators for Havrouta books..." }
-        setHearotAsDefaultCommentators(repository, logger)
 
         logger.i { "Total links created: ${talmudLinksCreated + hearotLinksCreated + transitiveLinksCreated}" }
 
@@ -621,39 +624,45 @@ private suspend fun generateHavroutaHearotLinks(
 }
 
 /**
- * Sets Hearot al Havrouta as the default commentator for each Havrouta book.
+ * Sets each 'הערות על X' book as a default commentator of every book that links
+ * to it. Pairs are derived from the link table (not from title prefixes), so a
+ * hearot whose base has a slightly different title is still paired, and a hearot
+ * with no links gets no default. Appends to existing defaults so seeded ones survive.
  */
 private suspend fun setHearotAsDefaultCommentators(
     repository: SeforimRepository,
+    driver: JdbcSqliteDriver,
     logger: Logger
 ) {
-    val allBooks = repository.getAllBooks()
-    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
-    val hearotBooks = allBooks.filter { it.title.startsWith("הערות על חברותא") }
-
-    // Build a map from tractate name to Hearot book
-    // "הערות על חברותא ברכות" -> extract "ברכות"
-    val hearotByTractate = hearotBooks.associateBy { book ->
-        book.title.removePrefix("הערות על חברותא").trim()
-    }
+    val pairs = driver.executeQuery(
+        null,
+        "SELECT DISTINCT l.sourceBookId, l.targetBookId FROM link l " +
+            "JOIN book tb ON tb.id = l.targetBookId " +
+            "WHERE tb.title LIKE 'הערות על %' " +
+            "ORDER BY l.sourceBookId, l.targetBookId",
+        { cursor ->
+            val list = mutableListOf<Pair<Long, Long>>()
+            while (cursor.next().value) {
+                list.add(cursor.getLong(0)!! to cursor.getLong(1)!!)
+            }
+            QueryResult.Value(list)
+        },
+        0
+    ).value
 
     var count = 0
-    for (havroutaBook in havroutaBooks) {
-        // "חברותא על ברכות" -> extract "ברכות"
-        val tractateName = havroutaBook.title.removePrefix("חברותא על ").trim()
-        val hearotBook = hearotByTractate[tractateName]
-
-        if (hearotBook != null) {
-            repository.setDefaultCommentatorsForBook(
-                havroutaBook.id,
-                listOf(DefaultCommentatorPosition(hearotBook.id, 0))
-            )
-            count++
-            logger.d { "Set ${hearotBook.title} as default for ${havroutaBook.title}" }
-        }
+    for ((baseBookId, hearotBookId) in pairs) {
+        val existing = repository.getDefaultCommentatorsForBook(baseBookId)
+        if (existing.any { it.commentatorBookId == hearotBookId }) continue
+        val nextPosition = (existing.maxOfOrNull { it.position } ?: -1) + 1
+        repository.setDefaultCommentatorsForBook(
+            baseBookId,
+            existing + DefaultCommentatorPosition(hearotBookId, nextPosition)
+        )
+        count++
     }
 
-    logger.i { "Set default commentators for $count Havrouta books" }
+    logger.i { "Set default commentators for $count base→hearot pairs" }
 }
 
 /**
