@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-05T08:48:03Z",
+  "generatedAt": "2026-07-05T08:55:23Z",
   "latest": {
     "assets": [
       {
@@ -7,7 +7,7 @@
         "contentType": "application/json",
         "createdAt": "2026-07-03T11:22:48Z",
         "digest": "sha256:e95e8029a5eafac8d36e38e76d0e8af29fcc2e12d81b9e8800c558cd531b47e1",
-        "downloadCount": 326,
+        "downloadCount": 328,
         "id": "RA_kwDOQ6kTXM4bvJJ2",
         "label": "",
         "name": "patch-v3-v7.db.zst.manifest.json",
@@ -21,7 +21,7 @@
         "contentType": "application/json",
         "createdAt": "2026-07-03T11:22:48Z",
         "digest": "sha256:7fdc00af10a42aac9dbeba3a0b1b6693fd1b65115dae7d69791d818b2606f196",
-        "downloadCount": 331,
+        "downloadCount": 333,
         "id": "RA_kwDOQ6kTXM4bvJJ1",
         "label": "",
         "name": "patch-v5-v7.db.zst.manifest.json",
@@ -35,7 +35,7 @@
         "contentType": "application/json",
         "createdAt": "2026-07-03T11:22:48Z",
         "digest": "sha256:9f611404fce33f019adf3a710a7707251597690f7231fe5ccadf230d727fce19",
-        "downloadCount": 330,
+        "downloadCount": 332,
         "id": "RA_kwDOQ6kTXM4bvJJ0",
         "label": "",
         "name": "patch-v6-v7.db.zst.manifest.json",
@@ -63,7 +63,7 @@
         "contentType": "application/octet-stream",
         "createdAt": "2026-07-03T11:22:48Z",
         "digest": "sha256:3d5830e222f2fa9c71ab653f427d99f251057819ffd2c88525750ba9300e3bee",
-        "downloadCount": 161,
+        "downloadCount": 163,
         "id": "RA_kwDOQ6kTXM4bvJJ5",
         "label": "",
         "name": "seforim.db.zst",
