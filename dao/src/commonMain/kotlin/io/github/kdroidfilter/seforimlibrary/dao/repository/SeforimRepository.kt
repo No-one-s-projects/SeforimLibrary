@@ -19,6 +19,10 @@ import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.LineTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
+import io.github.kdroidfilter.seforimlibrary.core.models.BookVersion
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
+import io.github.kdroidfilter.seforimlibrary.core.models.VersionLine
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
 import io.github.kdroidfilter.seforimlibrary.core.models.Source
@@ -2246,6 +2250,82 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
      */
     suspend fun getLinkAnchors(linkId: Long): List<LinkAnchor> = withContext(Dispatchers.IO) {
         database.linkAnchorQueriesQueries.selectByLinkId(linkId).executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * Inserts multiple link ranges in a single transaction.
+     * Idempotent; on duplicate (linkId, side) the widest range wins.
+     */
+    suspend fun insertLinkRangesBatch(ranges: List<LinkRange>) = withContext(Dispatchers.IO) {
+        if (ranges.isEmpty()) return@withContext
+        database.transaction {
+            ranges.forEach { range ->
+                database.linkRangeQueriesQueries.insertRange(
+                    linkId = range.linkId,
+                    side = range.side.toLong(),
+                    endLineId = range.endLineId,
+                    endLineIndex = range.endLineIndex.toLong(),
+                )
+            }
+        }
+    }
+
+    /**
+     * Inserts multiple link coverage rows in a single transaction.
+     * Idempotent: rows already present are ignored.
+     */
+    suspend fun insertLinkCoverageBatch(rows: List<LinkCoverage>) = withContext(Dispatchers.IO) {
+        if (rows.isEmpty()) return@withContext
+        database.transaction {
+            rows.forEach { row ->
+                database.linkRangeQueriesQueries.insertCoverage(
+                    lineId = row.lineId,
+                    linkId = row.linkId,
+                    side = row.side.toLong(),
+                )
+            }
+        }
+    }
+
+    /**
+     * Upserts multiple book versions in a single transaction (metadata may
+     * change between exports while the id stays pinned to bookId+versionTitle).
+     */
+    suspend fun insertBookVersionsBatch(versions: List<BookVersion>) = withContext(Dispatchers.IO) {
+        if (versions.isEmpty()) return@withContext
+        database.transaction {
+            versions.forEach { version ->
+                database.bookVersionQueriesQueries.insertVersion(
+                    id = version.id,
+                    bookId = version.bookId,
+                    versionTitle = version.versionTitle,
+                    heVersionTitle = version.heVersionTitle,
+                    versionSource = version.versionSource,
+                    priority = version.priority,
+                    license = version.license,
+                    versionNotes = version.versionNotes,
+                    heVersionNotes = version.heVersionNotes,
+                    hasContent = if (version.hasContent) 1L else 0L,
+                )
+            }
+        }
+    }
+
+    /**
+     * Upserts multiple version lines in a single transaction.
+     */
+    suspend fun insertVersionLinesBatch(rows: List<VersionLine>) = withContext(Dispatchers.IO) {
+        if (rows.isEmpty()) return@withContext
+        database.transaction {
+            rows.forEach { row ->
+                database.bookVersionQueriesQueries.insertVersionLine(
+                    versionId = row.versionId,
+                    lineId = row.lineId,
+                    content = row.content,
+                    charCount = row.charCount.toLong(),
+                )
+            }
+        }
     }
 
     /**
