@@ -12,6 +12,10 @@
   הספציפיים לאוצריא. כך בהיסטוריה של `otzaria` **רואים בבירור איפה כל ענף מתחיל ונגמר**:
 
 ```
+*   Merge branch 'feat/otzaria-ranged-links-and-alt-toc' into otzaria
+|\
+| * feat(otzaria): ranged links + alt-toc structures in the otzariasqlite generator
+|/
 *   Merge branch 'feat/hearot-standalone-books' into otzaria
 |\
 | * feat(otzaria): import 'הערות' companion files…
@@ -44,7 +48,8 @@ master → metadata_A → metadata_B → default_commentators        [בסיס �
    ▼
 fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
    → word-level-link-anchors → feat/ranged-links-and-book-versions
-   → feat/hearot-standalone-books                               [פיצ'רים — rebase, PR נפרד לכל אחד]
+   → feat/hearot-standalone-books → feat/otzaria-ranged-links-and-alt-toc
+                                                                [פיצ'רים — rebase, PR נפרד לכל אחד]
                                           │
                                           ▼   (כל פיצ'ר → בועת merge)
                                        otzaria  = בועות הפיצ'רים + קומיטי-אוצריא בראש
@@ -64,6 +69,7 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
 | 8 | `word-level-link-anchors` | ↑ | 3 | עוגני-מילה לקישורים |
 | 9 | `feat/ranged-links-and-book-versions` | ↑ | 3 | קישורי-טווח + גרסאות ספרים |
 | 10 | `feat/hearot-standalone-books` | ↑ | 1 | ספרי "הערות" עצמאיים כמפרשים |
+| 11 | `feat/otzaria-ranged-links-and-alt-toc` | ↑ | 1 | קישורי-טווח + alt-toc בגנרטור אוצריא |
 | — | `otzaria` | (merge של כולם) | 12 (+manifest) | קומיטים ספציפיים לאוצריא, בראש |
 
 ---
@@ -107,6 +113,22 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
 קבצי "הערות על &lt;title&gt;" מיובאים כספרים עצמאיים מקושרים (במקום `notesContent`
 הישן שאף לקוח לא הציג), ומוגדרים כמפרשי ברירת-מחדל לפי טבלת הקישורים (לא לפי תחיליות
 שם). — `feat(otzaria): import 'הערות' companion files as standalone linked commentator books`
+
+### 11. `feat/otzaria-ranged-links-and-alt-toc`
+מביא את הגנרטור של **otzariasqlite** לרמת ה-importer של ספריא בשני היבטים
+שהיו עד כה בצד ספריא בלבד:
+- **קישורי-טווח:** ה-JSON יכול לשאת `line_index_1_end`/`line_index_2_end`
+  (שורת-סיום 1-based לכל צד); הקישור נשאר מעוגן בשורת ההתחלה, `link_range`
+  שומר את שורת הסוף ו-`link_coverage` מסמן כל שורה מכוסה (כותרות מוחרגות).
+  הקישורים נכנסים דרך `insertLinkStable` לפי `(source,target,connectionType)`,
+  וטווחים ישנים נמחקים לפני ייבוא-מחדש (סנכרון סמכותי, delta-friendly).
+- **מבני alt-toc ("עליות"):** קריאת `alt_toc/<book>_alt_toc.json` (המקבילה
+  האוצריאית ל-`alts` של ספריא) → `alt_toc_structure`/`alt_toc_entry`/
+  `line_alt_toc`, כולל מיפוי כל שורה לעוגן הקודם הקרוב וסימון ילד-אחרון/יש-ילדים.
+  ספרי-ספריא לא נגעים (המבנים שלהם מהסכימה); מבנים/מפתחות שאינם מוכרזים עוד
+  נמחקים. — `feat(otzaria): ranged links + alt-toc structures in the otzariasqlite generator`
+> תלוי בטבלאות `link_range`/`link_coverage` (פיצ'ר #9) — לכן ממוקם מעליו.
+> טסטים: `OtzariaRangedLinksTest`, `OtzariaAltTocTest`.
 
 ### `otzaria` — ראש השרשרת
 הענף הראשי של הפורק. מכיל את **בועות** כל הפיצ'רים (merge לכל אחד), ומעליהן **רק**
