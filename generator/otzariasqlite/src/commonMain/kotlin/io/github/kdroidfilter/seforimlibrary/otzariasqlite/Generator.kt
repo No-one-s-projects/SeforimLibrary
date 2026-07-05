@@ -300,8 +300,6 @@ class DatabaseGenerator(
                 totalBooksToProcess = try {
                     Files.walk(libraryRoot).use { s ->
                         s.filter { Files.isRegularFile(it) && it.extension == "txt" }
-                            .filter { !it.fileName.toString().substringBeforeLast('.')
-                                .startsWith("הערות על ") }
                             .count().toInt()
                     }
                 } catch (_: Exception) { 0 }
@@ -408,8 +406,6 @@ class DatabaseGenerator(
                 totalBooksToProcess = try {
                     Files.walk(libraryRoot).use { s ->
                         s.filter { Files.isRegularFile(it) && it.extension == "txt" }
-                            .filter { !it.fileName.toString().substringBeforeLast('.')
-                                .startsWith("הערות על ") }
                             .count().toInt()
                     }
                 } catch (_: Exception) { 0 }
@@ -524,9 +520,6 @@ class DatabaseGenerator(
             s.filter { Files.isRegularFile(it) && it.extension == "txt" }
                 .filter { p ->
                     val fileName = p.fileName.toString()
-                    // Skip notes files
-                    val titleNoExt = fileName.substringBeforeLast('.')
-                    if (titleNoExt.startsWith("הערות על ")) return@filter false
                     // Skip files explicitly blacklisted by name
                     if (fileNameBlacklist.contains(fileName)) {
                         logger.d { "Skipping preload for blacklisted file '$fileName'" }
@@ -707,14 +700,7 @@ class DatabaseGenerator(
                             logger.i { "⏭️ Skipping already-processed priority book: $key" }
                             continue
                         }
-                        // Skip companion notes files named 'הערות על <title>.txt'.
-                        // Exception: "הערות על חברותא" files are standalone books, not companion notes.
                         val fname = entry.fileName.toString()
-                        val titleNoExt = fname.substringBeforeLast('.')
-                        if (titleNoExt.startsWith("הערות על ") && !titleNoExt.startsWith("הערות על חברותא")) {
-                            logger.i { "📝 Skipping notes file '$fname' (will be attached to base book if present)" }
-                            continue
-                        }
                         // Skip files explicitly blacklisted by name
                         if (fileNameBlacklist.contains(fname)) {
                             logger.i { "⛔ Skipping blacklisted file '$fname' by name" }
@@ -798,24 +784,6 @@ class DatabaseGenerator(
             listOf(PubDate(id = bindings.upsertPubDate(pubDateValue), date = pubDateValue))
         } ?: emptyList()
 
-        // Detect companion notes file named 'הערות על <title>.txt' in the same directory
-        val notesContent: String? = runCatching {
-            val dir = path.parent
-            val possibleTitles = listOf(title, rawTitle).distinct()
-            val candidate = possibleTitles
-                .map { dir.resolve("הערות על $it.txt") }
-                .firstOrNull { Files.isRegularFile(it) }
-            if (candidate != null) {
-                if (fileNameBlacklist.contains(candidate.fileName.toString())) {
-                    logger.i { "📝 Notes file '${candidate.fileName}' is blacklisted by name; skipping attachment" }
-                    return@runCatching null
-                }
-                val key = toLibraryRelativeKey(candidate)
-                val lines = bookContentCache[key]
-                if (lines != null) lines.joinToString("\n") else candidate.readText(Charsets.UTF_8)
-            } else null
-        }.getOrNull()
-
         val sourceId = resolveSourceIdFor(path)
         val book = Book(
             id = currentBookId,
@@ -827,7 +795,6 @@ class DatabaseGenerator(
             pubPlaces = pubPlaces,
             pubDates = pubDates,
             heShortDesc = meta?.heShortDesc,
-            notesContent = notesContent,
             order = meta?.order ?: 999f,
             topics = extractTopics(path),
             isBaseBook = isBaseBook
@@ -1139,11 +1106,6 @@ class DatabaseGenerator(
             // Last part is the book filename, everything before are categories
             val categories = if (parts.size > 1) parts.dropLast(1) else emptyList()
             val bookFileName = parts.last()
-            // Skip notes-only entries from priority list
-            if (bookFileName.substringBeforeLast('.').startsWith("הערות על ")) {
-                logger.i { "⏭️ Skipping notes file in priority list: $bookFileName" }
-                continue@outer
-            }
             // Skip files explicitly blacklisted by name
             if (fileNameBlacklist.contains(bookFileName)) {
                 logger.i { "⛔ Skipping blacklisted file in priority list: $bookFileName" }
