@@ -320,6 +320,9 @@ class DatabaseGenerator(
                 // Process links
                 processLinks()
 
+                // Alternate TOC structures (parasha/aliyah-style) from alt_toc/ files
+                processAltTocStructures()
+
                 // Build category closure table for fast descendant queries
                 logger.i { "Building category_closure (ancestor-descendant) table..." }
                 repository.rebuildCategoryClosure()
@@ -441,6 +444,7 @@ class DatabaseGenerator(
             repository.setJournalModeOff()
             repository.runInTransaction {
                 processLinks()
+                processAltTocStructures()
             }
         } finally {
             runCatching { enableForeignKeys() }
@@ -1242,6 +1246,8 @@ class DatabaseGenerator(
             headingLineIds.addAll(headingIds)
         }
         logger.i { "Heading lines tracked for filtering: ${headingLineIds.size}" }
+        // Deterministic connection-type ids (enum order), matching the Sefaria importer.
+        ConnectionType.values().forEach { bindings.upsertConnectionType(it.name) }
         val linksDir = sourceDirectory.resolve("links")
         if (!linksDir.exists()) {
             logger.w { "Links directory not found" }
@@ -1307,6 +1313,9 @@ class DatabaseGenerator(
 
         var processed = 0
         val anchorBatch = mutableListOf<LinkAnchor>()
+        val rangeBatch = mutableListOf<LinkRange>()
+        val coverageBatch = mutableListOf<LinkCoverage>()
+        val touchedLinkIds = mutableSetOf<Long>()
         for ((index, linkData) in links.withIndex()) {
             try {
                 val path = linkData.path_2
@@ -1339,16 +1348,22 @@ class DatabaseGenerator(
                 // Skip links where source or target is a heading line
                 if (sourceLineId in headingLineIds || targetLineId in headingLineIds) continue
 
-                val link = Link(
+                // Stable link id keyed by (sourceLineId, targetLineId, connectionTypeId),
+                // like the Sefaria importer — same line pair with a different type is a
+                // distinct link, and anchors/ranges below attach to the right row.
+                val typeId = bindings.upsertConnectionType(ConnectionType.fromString(linkData.connectionType).name)
+                val linkId = bindings.insertLinkStable(
                     sourceBookId = sourceBook.id,
                     targetBookId = targetBook.id,
                     sourceLineId = sourceLineId,
                     targetLineId = targetLineId,
-                    targetLineIndex = targetLineIndex,
-                    connectionType = ConnectionType.fromString(linkData.connectionType)
+                    targetLineIndex = targetLineIndex.toLong(),
+                    connectionTypeId = typeId,
                 )
-                val linkId = repository.insertLink(link)
+                touchedLinkIds += linkId
                 buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
+                queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
+                queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
                 processed++
             } catch (_: Exception) {
                 // Skip malformed entries but continue
@@ -1358,7 +1373,51 @@ class DatabaseGenerator(
             repository.insertLinkAnchorsBatch(anchorBatch)
             logger.i { "Inserted ${anchorBatch.size} word-level anchors for $bookTitle" }
         }
+        // Authoritative range sync: drop stale ranges of every link re-imported in
+        // this run, so a shortened or removed line_index_X_end takes effect on rerun.
+        touchedLinkIds.chunked(500).forEach { chunk ->
+            val ids = chunk.joinToString(",")
+            repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($ids)")
+            repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($ids)")
+        }
+        if (rangeBatch.isNotEmpty()) {
+            repository.insertLinkRangesBatch(rangeBatch)
+            repository.insertLinkCoverageBatch(coverageBatch)
+            logger.i { "Inserted ${rangeBatch.size} link ranges (${coverageBatch.size} coverage rows) for $bookTitle" }
+        }
         return processed
+    }
+
+    /**
+     * Queues link_range + link_coverage rows for one ranged side, Sefaria-style:
+     * the link stays anchored at the start line, `link_range` records the last
+     * line, and coverage rows mark every covered line after the first (headings
+     * excluded). Reversed/missing/heading ends are logged and dropped.
+     */
+    private suspend fun queueRangeSide(
+        rawEnd: Double?,
+        bookId: Long,
+        startLineIndex: Int,
+        linkId: Long,
+        side: Int,
+        bookTitle: String,
+        ranges: MutableList<LinkRange>,
+        coverage: MutableList<LinkCoverage>,
+    ) {
+        val endLineIndex = (rawEnd ?: return).toInt() - 1
+        // Degenerate range (end == start): a plain single-line link, nothing to record.
+        if (endLineIndex == startLineIndex) return
+        val endLineId = if (endLineIndex > startLineIndex) getLineIdCached(bookId, endLineIndex) else null
+        if (endLineId == null || endLineId in headingLineIds) {
+            logger.w { "Range end ${endLineIndex + 1} reversed/missing/heading for $bookTitle (side $side) — range dropped" }
+            return
+        }
+        ranges += LinkRange(linkId = linkId, side = side, endLineId = endLineId, endLineIndex = endLineIndex)
+        for (idx in (startLineIndex + 1)..endLineIndex) {
+            val coveredId = getLineIdCached(bookId, idx) ?: continue
+            if (coveredId in headingLineIds) continue
+            coverage += LinkCoverage(lineId = coveredId, linkId = linkId, side = side)
+        }
     }
 
     /**
@@ -1404,6 +1463,158 @@ class DatabaseGenerator(
         if (tail.isEmpty() || tail.length > 6) return null
         val valid = tail.all { it in 'א'..'ת' || it == '"' || it == '׳' || it == '״' }
         return if (valid) tail else null
+    }
+
+    /**
+     * Imports alternate-TOC structures (e.g. parasha/aliyah trees) from
+     * `alt_toc/<book>_alt_toc.json` files — the Otzaria-side equivalent of
+     * Sefaria's `alts` schemas. Each file holds a list of structures; every
+     * node anchors to a 1-based line and children nest recursively.
+     */
+    private suspend fun processAltTocStructures() {
+        ensureCachesLoaded()
+        val altTocDir = sourceDirectory.resolve("alt_toc")
+        val files = if (altTocDir.exists()) {
+            Files.list(altTocDir).use { s -> s.filter { it.extension == "json" }.toList() }
+                .sortedBy { it.fileName.toString() }
+        } else {
+            emptyList()
+        }
+
+        // Global sync: an Otzaria book whose alt_toc file disappeared loses its
+        // structures. Only non-Sefaria books can carry Otzaria-authored structures,
+        // so Sefaria books (whose structures come from their schemas) stay untouched.
+        val titlesWithFile = files.map { it.nameWithoutExtension.removeSuffix("_alt_toc") }.toSet()
+        for (book in booksById.values) {
+            if (book.id in sefariaBookIds || !book.hasAltStructures || book.title in titlesWithFile) continue
+            for (structure in repository.getAltTocStructuresForBook(book.id)) {
+                deleteAltTocStructure(structure.id)
+            }
+            repository.updateHasAltStructures(book.id, false)
+            logger.i { "Removed alt-toc structures of ${book.title} (no alt_toc file)" }
+        }
+
+        var builtBooks = 0
+        for (file in files) {
+            val bookTitle = file.nameWithoutExtension.removeSuffix("_alt_toc")
+            val book = booksByTitle[bookTitle]
+            if (book == null) {
+                logger.w { "Alt-toc file for unknown book: $bookTitle — skipped" }
+                continue
+            }
+            // Sefaria owns the alt structures of its own books (built from its schemas);
+            // an Otzaria file must not overwrite or delete them.
+            if (book.id in sefariaBookIds) {
+                logger.w { "Alt-toc file targets Sefaria-sourced book $bookTitle — ignored" }
+                continue
+            }
+            val parsed = runCatching { json.decodeFromString<List<AltTocStructureData>>(file.readText()) }
+            val structures = parsed.getOrNull()
+            if (structures == null) {
+                logger.w(parsed.exceptionOrNull()) { "Failed to parse alt-toc JSON for $bookTitle — skipped" }
+                continue
+            }
+            // The file is authoritative for its book: structures whose key is no
+            // longer declared are removed.
+            val declaredKeys = structures.map { it.key }.toSet()
+            for (existing in repository.getAltTocStructuresForBook(book.id)) {
+                if (existing.key !in declaredKeys) {
+                    deleteAltTocStructure(existing.id)
+                    logger.i { "Removed alt-toc structure '${existing.key}' of $bookTitle (no longer declared)" }
+                }
+            }
+            var bookHasStructures = false
+            for (structure in structures) {
+                if (buildAltTocStructure(book, structure)) bookHasStructures = true
+            }
+            repository.updateHasAltStructures(book.id, bookHasStructures)
+            if (bookHasStructures) builtBooks++
+        }
+        if (builtBooks > 0) logger.i { "Built alt-toc structures for $builtBooks books" }
+    }
+
+    /** Removes a structure with its entries and line mappings (FKs are off in phase 2). */
+    private suspend fun deleteAltTocStructure(structureId: Long) {
+        repository.executeRawQuery("DELETE FROM line_alt_toc WHERE structureId=$structureId")
+        repository.executeRawQuery("DELETE FROM alt_toc_entry WHERE structureId=$structureId")
+        repository.executeRawQuery("DELETE FROM alt_toc_structure WHERE id=$structureId")
+    }
+
+    /** Builds one alt-toc structure; returns true when at least one entry was inserted. */
+    private suspend fun buildAltTocStructure(book: Book, data: AltTocStructureData): Boolean {
+        if (data.key.isBlank()) {
+            logger.w { "Alt-toc structure with blank key for ${book.title} — skipped" }
+            return false
+        }
+        // Wholesale rebuild — including the structure row itself, since the repo
+        // upsert dedups on (bookId, key) without refreshing title/heTitle. The id
+        // is allocator-stable per (bookId, key), so the fresh row keeps its id.
+        // (Entry ids stay auto-allocated, matching the Sefaria builder's
+        // Phase 1.5 deferral.)
+        val structureId = allocator.altTocStructureId(book.id, data.key)
+        deleteAltTocStructure(structureId)
+        if (data.nodes.isEmpty()) {
+            logger.w { "Alt-toc structure '${data.key}' of ${book.title} has no nodes — removed" }
+            return false
+        }
+        bindings.upsertAltTocStructureStable(
+            AltTocStructure(bookId = book.id, key = data.key, title = data.title, heTitle = data.heTitle)
+        )
+
+        val entriesByParent = mutableMapOf<Long?, MutableList<Long>>()
+        val usedLinesByParent = mutableMapOf<Long?, MutableSet<Long>>()
+        // lineIndex -> entryId; children insert after their parent, so the deepest
+        // entry starting on a shared line wins (same rule as the Sefaria builder).
+        val anchorByLineIndex = mutableMapOf<Int, Long>()
+
+        suspend fun addNode(node: AltTocNodeData, level: Int, parentId: Long?): Boolean {
+            val lineIndex = node.line.toInt() - 1
+            val lineId = getLineIdCached(book.id, lineIndex)
+            if (lineId == null) {
+                logger.w { "Alt-toc node '${node.heTitle}' line ${node.line.toInt()} out of range in ${book.title} — node dropped" }
+                return false
+            }
+            if (!usedLinesByParent.getOrPut(parentId) { mutableSetOf() }.add(lineId)) {
+                logger.w { "Alt-toc node '${node.heTitle}' reuses line ${node.line.toInt()} under the same parent in ${book.title} — node dropped" }
+                return false
+            }
+            val textId = bindings.upsertTocText(node.heTitle)
+            val entryId = repository.insertAltTocEntry(
+                AltTocEntry(
+                    structureId = structureId, parentId = parentId, textId = textId,
+                    text = node.heTitle, level = level, lineId = lineId,
+                )
+            )
+            entriesByParent.getOrPut(parentId) { mutableListOf() } += entryId
+            anchorByLineIndex[lineIndex] = entryId
+            var hasChild = false
+            for (child in node.children) if (addNode(child, level + 1, entryId)) hasChild = true
+            if (hasChild) repository.updateAltTocEntryHasChildren(entryId, true)
+            return true
+        }
+
+        var any = false
+        for (node in data.nodes) if (addNode(node, 0, null)) any = true
+        if (!any) {
+            deleteAltTocStructure(structureId)
+            logger.w { "All nodes of alt-toc structure '${data.key}' in ${book.title} were dropped — structure removed" }
+            return false
+        }
+
+        for ((_, children) in entriesByParent) {
+            repository.updateAltTocEntryIsLastChild(children.last(), true)
+        }
+        // Map every line to the nearest preceding anchor.
+        val anchors = anchorByLineIndex.entries.sortedBy { it.key }
+        var ai = 0
+        var current: Long? = null
+        for (lineIdx in 0 until book.totalLines) {
+            while (ai < anchors.size && anchors[ai].key <= lineIdx) { current = anchors[ai].value; ai++ }
+            val entryId = current ?: continue
+            val lineId = getLineIdCached(book.id, lineIdx) ?: continue
+            repository.upsertLineAltToc(lineId, structureId, entryId)
+        }
+        return true
     }
 
     /**
@@ -1696,7 +1907,11 @@ class DatabaseGenerator(
         // source line's stored content (line_index_1 side). Present e.g. in the
         // "אור הישר" family and in the converted משנה ברורה → שער הציון links.
         val start: Double? = null,
-        val end: Double? = null
+        val end: Double? = null,
+        // Optional Sefaria-style ranged link: 1-based inclusive end line per
+        // side; the link row itself stays anchored at the start line.
+        val line_index_1_end: Double? = null,
+        val line_index_2_end: Double? = null
     )
 
     /**
@@ -1707,6 +1922,23 @@ class DatabaseGenerator(
         val start: Int,
         val end: Int,
         val refs: Map<String, String>
+    )
+
+    /** One alt-toc node: a heading anchored to a 1-based line, with nested children. */
+    @Serializable
+    private data class AltTocNodeData(
+        val heTitle: String,
+        val line: Double,
+        val children: List<AltTocNodeData> = emptyList(),
+    )
+
+    /** One alternate-TOC structure from an `alt_toc/<book>_alt_toc.json` file. */
+    @Serializable
+    private data class AltTocStructureData(
+        val key: String,
+        val title: String? = null,
+        val heTitle: String? = null,
+        val nodes: List<AltTocNodeData> = emptyList(),
     )
 
 }
