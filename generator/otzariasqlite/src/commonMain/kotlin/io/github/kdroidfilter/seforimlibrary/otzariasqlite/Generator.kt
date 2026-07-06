@@ -1348,22 +1348,34 @@ class DatabaseGenerator(
                 // Skip links where source or target is a heading line
                 if (sourceLineId in headingLineIds || targetLineId in headingLineIds) continue
 
-                // Stable link id keyed by (sourceLineId, targetLineId, connectionTypeId),
-                // like the Sefaria importer — same line pair with a different type is a
-                // distinct link, and anchors/ranges below attach to the right row.
-                val typeId = bindings.upsertConnectionType(ConnectionType.fromString(linkData.connectionType).name)
+                // SOURCE is declared from the dependant's file; like the Sefaria importer
+                // we flip it to canonical base→dependant and store it as COMMENTARY.
+                val declaredType = ConnectionType.fromString(linkData.connectionType)
+                val flip = declaredType == ConnectionType.SOURCE
+                val storedType = if (flip) ConnectionType.COMMENTARY else declaredType
+                // Stable link id keyed by (sourceLineId, targetLineId, connectionTypeId), like Sefaria.
+                val typeId = bindings.upsertConnectionType(storedType.name)
                 val linkId = bindings.insertLinkStable(
-                    sourceBookId = sourceBook.id,
-                    targetBookId = targetBook.id,
-                    sourceLineId = sourceLineId,
-                    targetLineId = targetLineId,
-                    targetLineIndex = targetLineIndex.toLong(),
+                    sourceBookId = if (flip) targetBook.id else sourceBook.id,
+                    targetBookId = if (flip) sourceBook.id else targetBook.id,
+                    sourceLineId = if (flip) targetLineId else sourceLineId,
+                    targetLineId = if (flip) sourceLineId else targetLineId,
+                    targetLineIndex = (if (flip) sourceLineIndex else targetLineIndex).toLong(),
                     connectionTypeId = typeId,
                 )
                 touchedLinkIds += linkId
-                buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
-                queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
-                queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                // Anchor is source-side; skip when flipped (that line is now the stored target).
+                if (!flip) {
+                    buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
+                }
+                // Range side 0 = stored source, 1 = stored target; the flip swaps each file's end.
+                if (flip) {
+                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                } else {
+                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                }
                 processed++
             } catch (_: Exception) {
                 // Skip malformed entries but continue
