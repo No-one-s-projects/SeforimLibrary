@@ -1339,16 +1339,33 @@ class DatabaseGenerator(
                 // Skip links where source or target is a heading line
                 if (sourceLineId in headingLineIds || targetLineId in headingLineIds) continue
 
-                val link = Link(
-                    sourceBookId = sourceBook.id,
-                    targetBookId = targetBook.id,
-                    sourceLineId = sourceLineId,
-                    targetLineId = targetLineId,
-                    targetLineIndex = targetLineIndex,
-                    connectionType = ConnectionType.fromString(linkData.connectionType)
-                )
+                val declaredType = ConnectionType.fromString(linkData.connectionType)
+                val link = if (declaredType == ConnectionType.SOURCE) {
+                    // SOURCE (declared from the dependant's file) is never stored;
+                    // persist canonically base→dependant, like the Sefaria importer.
+                    Link(
+                        sourceBookId = targetBook.id,
+                        targetBookId = sourceBook.id,
+                        sourceLineId = targetLineId,
+                        targetLineId = sourceLineId,
+                        targetLineIndex = sourceLineIndex,
+                        connectionType = ConnectionType.COMMENTARY,
+                    )
+                } else {
+                    Link(
+                        sourceBookId = sourceBook.id,
+                        targetBookId = targetBook.id,
+                        sourceLineId = sourceLineId,
+                        targetLineId = targetLineId,
+                        targetLineIndex = targetLineIndex,
+                        connectionType = declaredType,
+                    )
+                }
                 val linkId = repository.insertLink(link)
-                buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
+                // Anchors are source-side; skip when the link was flipped.
+                if (declaredType != ConnectionType.SOURCE) {
+                    buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
+                }
                 processed++
             } catch (_: Exception) {
                 // Skip malformed entries but continue
