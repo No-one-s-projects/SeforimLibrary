@@ -1,0 +1,81 @@
+# רשימה שחורה של גרסאות (מהדורות ספרים, book_version) — גרסה שמופיעה כאן לא תיכנס
+# ל-DB כלל: לא הטקסט שלה ולא המטא-דאטה שלה.
+#
+# כללי רישום:
+#   שורות ריקות ושורות שמתחילות ב-# — מתעלמים מהן.
+#
+#   שם גרסה                        חסימת הגרסה בכל הספרים שבהם היא מופיעה.
+#   שם ספר | שם גרסה               חסימת הגרסה בספר הזה בלבד.
+#
+#   שם הספר: הכותרת העברית או האנגלית, כפי שמופיעה בסכמות ספריא (heTitle/title).
+#   שם הגרסה: versionTitle (אנגלי) או versionTitleInHebrew — שניהם נתמכים.
+#   ההשוואה מתעלמת מרישיות, מרווחים כפולים ומגרשיים/מרכאות (כמו שאר הבלאקליסטים).
+#   המפריד הוא | (צינור); לכן שם שמכיל | אינו נתמך בכלל סקופי.
+#
+# דוגמאות (מנוטרלות):
+#   Version of the Rashash
+#   נוסחת הרש"ש
+#   משנה ביכורים | נוסחת הגמרא -- מנוקד
+#   Mishnah Bikkurim | Version of the Gemara - vocalized
+
+# --- גרסאות זבל: מגילת אימוג'ים, ג'יבריש, פרגמנטים של עריכה ---
+אסתר | Emoji Megillah
+רש"י על בראשית | test
+אברבנאל על שופטים | nhhu
+רש"ר הירש על התורה | try hebrew
+חידושי אגדות על בבא מציעא | 1
+אבן עזרא על זכריה | 1
+רש"י על שבת | rashi
+רש"י על משלי | rashi
+רש"י על במדבר | Corrected Rashi
+בית יוסף | hi
+פרדס רמונים | oi
+טור | rp
+רבנו בחיי | Al alazar hakohen
+צאינה וראינה | AI-assisted translation
+בעל הטורים על בראשית | Unknown
+בעל הטורים על בראשית | Baal HaTurim 44Ñ18
+בעל הטורים על בראשית | Baal Haturim Gen 16:8
+בעל הטורים על בראשית | bal haturim ber 16:8
+רד"ק על תהילים | Radak on Psalms 113:1
+רלב"ג על מלכים ב | Ralbag on Melachim II, 4:21
+
+# --- כתובות URL ככותרת גרסה ---
+רש"י על דברי הימים ב | http://mobile.tora.ws/
+בכור שור | http://primo.nli.org.il/primo_library/libweb/action/dlDisplay.do?vid=NLI&docId=NNL_ALEPH002062194
+קידושין | https://korenpub.co.il/collections/the-noe-edition-koren-talmud-bavli-1
+בבא קמא | https://korenpub.co.il/collections/the-noe-edition-koren-talmud-bavli-1
+ערוך השולחן | https://www.nli.org.il/he/books/NNL_ALEPH001326511
+חוות יאיר | https://www.nli.org.il/he/books/NNL_ALEPH001842783
+
+# --- מהדורות בשפה זרה (יידיש נשארת בכוונה) ---
+Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otzar haTorah, 1985 [fa]
+בראשית | Judeo-Italian Pentateuch transcribed by Robbie Kramm [itk]
+בראשית | benjamin derhambakhsh 2022 [fa]
+אסתר | Book of Esther in Farsi, trans. by Pole-Choubi, synagogue Talmood Torah [fa]
+משנה אבות | Nahj Al-Salaf - The Beit Dakira Translation [ar]
+מילות הגיון | Moroccan Arabic Translation [ary]
+מילות הגיון | The Beit Dakira Arabic translation [ar]
+הכוזרי | Kuzari in Arabic, trans. Nabih Bashir, Al-Kamel Verlag, 2012 [ar]
+חפץ חיים | Sefaria Community Translation [fa]
+משנה ברורה | Mishnah Berura Amud Yomi
+# ערבית-יהודית (המקור של מורה נבוכים והכוזרי) — נחסם כשפה זרה:
+מורה נבוכים | Judeo Arabic, Paris, 1856 [jrb]
+הכוזרי | Kitab al Khazari [jrb]
+
+# --- גרסאות "temp" — שאריות עבודה של ספריא ---
+אברבנאל על מלכים א | Abarbanel on I Kings temp
+ברטנורא על משנה תרומות | Bartenura on Mishnah Terumot temp
+בכור שור | Bekhor Shor temp
+עין יעקב | Ein Yaakov temp
+מורה נבוכים | Guide for the Perplexed temp
+תלמוד ירושלמי שביעית | Jerusalem Talmud Sheviit temp
+רבינו יונה על פרקי אבות | Rabbeinu Yonah on Pirkei Avot temp
+רש"י על מכות | Rashi on Makkot temp
+ראש השנה | Rosh Hashanah temp
+סידור נוסח עדות המזרח | Siddur Edot HaMizrach temp
+טור | Tur temp
+יבמות | Yevamot temp
+תפסיר רס"ג | Tafsir Rasag temp
+# פרגמנט עם תרגום אנגלי משובץ (הכותרת מנוקדת — הועתקה מה-DB כלשונה):
+מחשבות חרוץ | מַחְשָׁבוֹת חָרוּץ אוֹת ו
