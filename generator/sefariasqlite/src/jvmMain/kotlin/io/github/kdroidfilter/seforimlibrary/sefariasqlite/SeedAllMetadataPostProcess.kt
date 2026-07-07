@@ -24,7 +24,7 @@ import kotlin.system.exitProcess
  * Enriches book metadata in an already-built seforim.db from two assets in the
  * `fordb-latest` release archive (same source as renameCategories/seedGenerations):
  *
- *  - ForDB/all_metadata.json — publication dates/places and source folder per book.
+ *  - ForDB/all_metadata.json — publication dates/places per book.
  *  - ForDB/sefaria_metadata_changes.csv — per-title description overrides
  *    (columns: categoryPath,title,author,heShortDesc,heDesc,heDescNew).
  *
@@ -33,15 +33,10 @@ import kotlin.system.exitProcess
  * library (a superset of any single generated DB), so unmatched titles are
  * skipped and counted — not fatal. Download/parse failures ARE fatal.
  *
- * Per matched book:
- *  - heShortDesc and heDesc (the latter from the CSV's heDescNew column) replace
- *    the existing value only when present (COALESCE keep-existing).
- *  - sourceId is set from Sourcefolder via SOURCEFOLDER_TO_DB_SOURCE (existing rows only).
- *  - pub dates and pub place are created through the IdAllocator and linked.
- *
- * pub_date and pub_place are IdAllocator-managed tables: creating rows via the
- * allocator (not raw INSERT) keeps their ids stable across builds, which the
- * delta-update pipeline relies on. build_state is snapshotted at the end.
+ * Per matched book: heShortDesc/heDesc replaced only when present; pub dates/place
+ * linked via the IdAllocator (stable ids for delta). The book's source is NOT set
+ * here — it is authoritative from the manifest at import; all_metadata's Sourcefolder
+ * is stale and ignored. build_state is snapshotted at the end.
  *
  * Usage:
  *   ./gradlew :sefariasqlite:seedAllMetadata -PseforimDb=/path/to/seforim.db
@@ -49,26 +44,6 @@ import kotlin.system.exitProcess
  */
 private const val ALL_METADATA_FILE = "all_metadata.json"
 private const val METADATA_CHANGES_FILE = "sefaria_metadata_changes.csv"
-
-/**
- * Maps each all_metadata.json `Sourcefolder` to the source name used in the built
- * DB (manifest top-level dir, mostly `<x>ToOtzaria`). The casing/suffix differences
- * are irregular, so the mapping is explicit rather than derived. An unknown
- * Sourcefolder is fatal (see resolveSourceFolders) — release data changed and the
- * mapping must be updated, not silently ignored.
- */
-internal val SOURCEFOLDER_TO_DB_SOURCE = mapOf(
-    "Dicta" to "DictaToOtzaria",
-    "OnYourWay" to "OnYourWayToOtzaria",
-    "ToratEmet" to "ToratEmetToOtzaria",
-    "MoreBooks" to "MoreBooks",
-    "Orayta" to "OraytaToOtzaria",
-    "wiki_jewish_books" to "wikiJewishBooksToOtzaria",
-    "wikiSource" to "wikisourceToOtzaria",
-    "Pninim" to "pninimToOtzaria",
-    "Tashma" to "tashmaToOtzaria",
-    "Ben-Yehuda" to "Ben-YehudaToOtzaria",
-)
 
 private val json = Json { ignoreUnknownKeys = true }
 
@@ -125,7 +100,6 @@ private fun resolveBuildStatePath(dbPath: Path): Path {
 internal data class BulkMetadata(
     val pubDates: List<Int>,
     val pubPlaceHe: String?,
-    val sourcefolder: String?,
 )
 
 internal data class Description(
@@ -133,7 +107,7 @@ internal data class Description(
     val heDesc: String?,
 )
 
-private data class MetadataResult(val updated: Int, val unmatched: Int)
+internal data class MetadataResult(val updated: Int, val unmatched: Int)
 
 internal fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
     json.parseToJsonElement(lines.joinToString("\n")).jsonArray.mapNotNull { element ->
@@ -142,7 +116,6 @@ internal fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
         title to BulkMetadata(
             pubDates = (obj["pubDate"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.intOrNull } ?: emptyList(),
             pubPlaceHe = obj.string("pubPlaceStringHe"),
-            sourcefolder = obj.string("Sourcefolder"),
         )
     }.toMap()
 
@@ -169,7 +142,7 @@ internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Descrip
     }.toMap()
 }
 
-private suspend fun applyMetadata(
+internal suspend fun applyMetadata(
     repository: SeforimRepository,
     bindings: IdAllocatorBindings,
     bulk: Map<String, BulkMetadata>,
@@ -177,8 +150,6 @@ private suspend fun applyMetadata(
     logger: Logger,
 ): MetadataResult {
     val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second }, { it.first })
-    val sourceIdsByName = repository.getAllSources().associate { it.name.lowercase() to it.id }
-    val sourceIdByFolder = resolveSourceFolders(bulk, sourceIdsByName, logger)
 
     var updated = 0
     var unmatched = 0
@@ -196,13 +167,11 @@ private suspend fun applyMetadata(
         val bookId = ids.single()
         val meta = bulk[title]
         val description = descriptions[title]
-        val sourceId = meta?.sourcefolder?.let { sourceIdByFolder[it] }
 
         repository.updateBookMetadata(
             bookId = bookId,
             heShortDesc = description?.heShortDesc,
             heDesc = description?.heDesc,
-            sourceId = sourceId,
         )
 
         // pub_date / pub_place go through the allocator for stable ids (delta-safety).
@@ -215,34 +184,6 @@ private suspend fun applyMetadata(
         updated++
     }
     return MetadataResult(updated, unmatched)
-}
-
-/**
- * Resolves each Sourcefolder seen in the metadata to a DB source id via
- * SOURCEFOLDER_TO_DB_SOURCE. Unknown Sourcefolder values are fatal (release data
- * changed; the explicit mapping must be updated). A mapped name absent from this
- * DB build resolves to null — expected, since the metadata is a library-wide
- * superset of any single generated DB.
- */
-internal fun resolveSourceFolders(
-    bulk: Map<String, BulkMetadata>,
-    sourceIdsByName: Map<String, Long>,
-    logger: Logger,
-): Map<String, Long> {
-    val folders = bulk.values.mapNotNull { it.sourcefolder }.toSet()
-    val unknown = folders.filterNot { it in SOURCEFOLDER_TO_DB_SOURCE }
-    require(unknown.isEmpty()) {
-        "all-metadata: unmapped Sourcefolder value(s) ${unknown.sorted()}; " +
-            "update SOURCEFOLDER_TO_DB_SOURCE"
-    }
-    return folders.mapNotNull { folder ->
-        val dbName = SOURCEFOLDER_TO_DB_SOURCE.getValue(folder)
-        val id = sourceIdsByName[dbName.lowercase()]
-        if (id == null) {
-            logger.i { "all-metadata: source '$dbName' not in this DB; sourceId skipped for '$folder'" }
-            null
-        } else folder to id
-    }.toMap()
 }
 
 private fun JsonObject.string(key: String): String? =

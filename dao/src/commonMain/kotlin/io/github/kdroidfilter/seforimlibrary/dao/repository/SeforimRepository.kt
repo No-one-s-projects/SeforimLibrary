@@ -1075,20 +1075,15 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d{"Updated book $bookId with categoryId: $categoryId"}
     }
 
-    /**
-     * Enriches a book's metadata. Descriptions are replaced only when an override is
-     * supplied (COALESCE keep-existing); sourceId is updated only when non-null.
-     */
+    /** Replaces descriptions only when an override is supplied (keep-existing). */
     suspend fun updateBookMetadata(
         bookId: Long,
         heShortDesc: String?,
         heDesc: String?,
-        sourceId: Long?,
     ) = withContext(Dispatchers.IO) {
         if (heShortDesc != null || heDesc != null) {
             database.bookQueriesQueries.updateDescriptions(heShortDesc, heDesc, bookId)
         }
-        if (sourceId != null) database.bookQueriesQueries.updateSourceId(sourceId, bookId)
     }
 
     /** Lightweight (id, title) pairs for every book — used by ForDB metadata post-processes. */
