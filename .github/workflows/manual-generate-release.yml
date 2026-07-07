@@ -16,6 +16,14 @@ name: Manual Generate + Pre-Release
 on:
   workflow_dispatch:
     inputs:
+      runner_selection:
+        description: 'בחר על איזה שרת להריץ את הבנייה'
+        required: true
+        default: 'ARM64'
+        type: choice
+        options:
+          - 'ARM64'
+          - 'server-2'
       prerelease:
         description: |
           Publish as a GitHub pre-release (true, default) or a final
@@ -40,7 +48,7 @@ concurrency:
 jobs:
   build-and-release:
     name: Build seforim.db + bundle + delta fan, publish pre-release
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
     timeout-minutes: 360
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
