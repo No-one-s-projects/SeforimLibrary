@@ -28,6 +28,49 @@ internal data class BlacklistFilterResult(
     val skippedNormalizedPaths: Set<String>
 )
 
+/** Blacklist of book editions (book_version). Format rules: see black_versions.txt. */
+internal data class VersionsBlacklist(
+    val globalKeys: Set<String>,
+    val perBookKeys: Map<String, Set<String>>
+) {
+    fun isEmpty(): Boolean = globalKeys.isEmpty() && perBookKeys.isEmpty()
+
+    fun isBlocked(bookKeys: Set<String>, versionKeys: Set<String>): Boolean {
+        if (versionKeys.any { it in globalKeys }) return true
+        return bookKeys.any { book ->
+            perBookKeys[book]?.let { blocked -> versionKeys.any { it in blocked } } == true
+        }
+    }
+
+    companion object {
+        val Empty = VersionsBlacklist(globalKeys = emptySet(), perBookKeys = emptyMap())
+    }
+}
+
+internal fun loadVersionsBlacklist(classLoader: ClassLoader?, logger: Logger): VersionsBlacklist =
+    parseVersionsBlacklist(loadBlacklistEntries(classLoader, "black_versions.txt", logger), logger)
+
+internal fun parseVersionsBlacklist(entries: List<String>, logger: Logger): VersionsBlacklist {
+    val globalKeys = LinkedHashSet<String>()
+    val perBookKeys = LinkedHashMap<String, MutableSet<String>>()
+    entries.forEach { entry ->
+        val separator = entry.indexOf('|')
+        if (separator < 0) {
+            val key = normalizeTitleKey(entry)
+            if (key != null) globalKeys += key
+            return@forEach
+        }
+        val bookKey = normalizeTitleKey(entry.substring(0, separator))
+        val versionKey = normalizeTitleKey(entry.substring(separator + 1))
+        if (bookKey == null || versionKey == null) {
+            logger.w { "black_versions.txt: malformed entry skipped: $entry" }
+            return@forEach
+        }
+        perBookKeys.getOrPut(bookKey) { LinkedHashSet() } += versionKey
+    }
+    return VersionsBlacklist(globalKeys = globalKeys, perBookKeys = perBookKeys)
+}
+
 internal fun loadSefariaBlacklists(classLoader: ClassLoader?, logger: Logger): SefariaBlacklists {
     val authorEntries = loadBlacklistEntries(classLoader, "authors_blacklist.txt", logger)
     val bookEntries = loadBlacklistEntries(classLoader, "books_blacklist.txt", logger)

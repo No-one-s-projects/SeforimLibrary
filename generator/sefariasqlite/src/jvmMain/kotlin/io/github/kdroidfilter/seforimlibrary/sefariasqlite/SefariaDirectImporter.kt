@@ -396,7 +396,14 @@ class SefariaDirectImporter(
 
         // Versions pass — after all lines exist so ref→lineId joins always land.
         logger.i { "Importing book versions..." }
-        SefariaVersionsImporter(repository, allocator, json, bookPayloadReader, logger)
+        val versionsBlacklist = loadVersionsBlacklist(classLoader, logger)
+        if (!versionsBlacklist.isEmpty()) {
+            logger.i {
+                "Loaded versions blacklist: global=${versionsBlacklist.globalKeys.size}, " +
+                    "perBook=${versionsBlacklist.perBookKeys.values.sumOf { it.size }}"
+            }
+        }
+        SefariaVersionsImporter(repository, allocator, json, bookPayloadReader, logger, versionsBlacklist)
             .import(versionBookInputs, lineKeyToId)
 
         // Apply default mappings

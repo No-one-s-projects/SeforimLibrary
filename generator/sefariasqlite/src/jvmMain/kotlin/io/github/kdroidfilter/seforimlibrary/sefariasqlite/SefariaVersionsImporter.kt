@@ -25,6 +25,7 @@ import kotlin.io.path.readText
  *    (single-version books — the book's own lines ARE the edition).
  *
  * Runs after all book lines are inserted, so every joined lineId exists.
+ * Versions listed in black_versions.txt are skipped entirely (no row at all).
  */
 internal class SefariaVersionsImporter(
     private val repository: SeforimRepository,
@@ -32,6 +33,7 @@ internal class SefariaVersionsImporter(
     private val json: Json,
     private val payloadReader: SefariaBookPayloadReader,
     private val logger: Logger = Logger.withTag("SefariaVersionsImporter"),
+    private val blacklist: VersionsBlacklist = VersionsBlacklist.Empty,
 ) {
     internal data class BookInput(
         val payload: BookPayload,
@@ -46,6 +48,7 @@ internal class SefariaVersionsImporter(
     private var duplicateRefs = 0L
     private var emptyWalks = 0
     private var filesSkipped = 0
+    private var versionsBlacklisted = 0
 
     private val versionBatch = mutableListOf<BookVersion>()
     private val lineBatch = mutableListOf<VersionLine>()
@@ -64,12 +67,14 @@ internal class SefariaVersionsImporter(
         logger.i {
             "Versions import: withContent=$versionsWithContent, metadataOnly=$metadataOnlyVersions, " +
                 "versionLines=$versionLineRows, segmentsUnmatched=$segmentsUnmatched, " +
-                "duplicateRefs=$duplicateRefs, emptyWalks=$emptyWalks, filesSkipped=$filesSkipped"
+                "duplicateRefs=$duplicateRefs, emptyWalks=$emptyWalks, filesSkipped=$filesSkipped, " +
+                "blacklisted=$versionsBlacklisted"
         }
     }
 
     private fun importMetadataOnly(input: BookInput) {
         input.payload.versionsMeta.distinctBy { it.title }.forEach { meta ->
+            if (isBlacklisted(input.payload, meta.title, heVersionTitle = null)) return@forEach
             versionBatch += BookVersion(
                 id = allocator.bookVersionId(input.bookId, meta.title),
                 bookId = input.bookId,
@@ -119,6 +124,9 @@ internal class SefariaVersionsImporter(
                 filesSkipped++
                 continue
             }
+            val heVersionTitle =
+                doc["versionTitleInHebrew"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            if (isBlacklisted(payload, versionTitle, heVersionTitle)) continue
 
             val walk = payloadReader.walkTextWithSchema(
                 schemaObj = schemaObj,
@@ -157,7 +165,7 @@ internal class SefariaVersionsImporter(
                 id = versionId,
                 bookId = input.bookId,
                 versionTitle = versionTitle,
-                heVersionTitle = doc["versionTitleInHebrew"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() },
+                heVersionTitle = heVersionTitle,
                 versionSource = doc["versionSource"]?.stringOrNull(),
                 priority = doc["priority"]?.stringOrNull()?.toDoubleOrNull(),
                 license = doc["license"]?.stringOrNull(),
@@ -172,6 +180,16 @@ internal class SefariaVersionsImporter(
             // with many large editions.
             flushIfNeeded()
         }
+    }
+
+    private fun isBlacklisted(payload: BookPayload, versionTitle: String, heVersionTitle: String?): Boolean {
+        if (blacklist.isEmpty()) return false
+        val bookKeys = setOfNotNull(normalizeTitleKey(payload.heTitle), normalizeTitleKey(payload.enTitle))
+        val versionKeys = setOfNotNull(normalizeTitleKey(versionTitle), normalizeTitleKey(heVersionTitle))
+        if (!blacklist.isBlocked(bookKeys, versionKeys)) return false
+        versionsBlacklisted++
+        logger.i { "Version blacklisted: ${payload.heTitle} / $versionTitle" }
+        return true
     }
 
     private fun discoverVersionFiles(sourceDirPath: String?): List<Path> {
