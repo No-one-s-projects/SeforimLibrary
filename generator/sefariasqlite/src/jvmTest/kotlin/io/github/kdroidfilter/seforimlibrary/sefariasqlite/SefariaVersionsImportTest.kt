@@ -224,4 +224,193 @@ class SefariaVersionsImportTest {
 
         repo.close()
     }
+
+    @Test
+    fun versionsBlacklistParsingAndMatching() {
+        val logger = Logger.withTag("SefariaVersionsImportTest")
+        val blacklist = parseVersionsBlacklist(
+            listOf(
+                "Version of the Rashash",
+                "נוסחת הרש\"ש",
+                "משנה ביכורים | נוסחת הגמרא -- מנוקד",
+                "Mishnah Bikkurim | Version of the Gemara - vocalized",
+                " | broken entry",
+            ),
+            logger,
+        )
+        assertEquals(2, blacklist.globalKeys.size)
+        assertEquals(2, blacklist.perBookKeys.values.sumOf { it.size })
+
+        val bookKeys = setOf("משנה ביכורים", "mishnah bikkurim")
+        // Global: any book; quotes/case-insensitive via normalizeTitleKey.
+        assertEquals(
+            true,
+            blacklist.isBlocked(setOf("ספר אחר"), setOfNotNull(normalizeTitleKey("נוסחת הרש''ש"))),
+        )
+        // Scoped: blocked only for the named book.
+        val scopedVersion = setOfNotNull(normalizeTitleKey("Version of the Gemara - Vocalized"))
+        assertEquals(true, blacklist.isBlocked(bookKeys, scopedVersion))
+        assertEquals(false, blacklist.isBlocked(setOf("ספר אחר"), scopedVersion))
+        // Unlisted version passes.
+        assertEquals(
+            false,
+            blacklist.isBlocked(bookKeys, setOfNotNull(normalizeTitleKey("Torat Emet 357"))),
+        )
+    }
+
+    @Test
+    fun blacklistedVersionsAreNotImported() = runBlocking {
+        val tempDir = Files.createTempDirectory("seforim-versions-blacklist")
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+
+        val bookDir = Files.createDirectories(jsonDir.resolve("Test Book"))
+        Files.writeString(
+            schemaDir.resolve("Test_Book.json"),
+            """
+            |{
+            |  "schema": {
+            |    "title": "Test Book",
+            |    "heTitle": "ספר בדיקה",
+            |    "sectionNames": ["Paragraph"],
+            |    "heSectionNames": ["פסקה"],
+            |    "addressTypes": ["Integer"],
+            |    "depth": 1
+            |  },
+            |  "heCategories": ["תנך"]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve("merged.json"),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "heTitle": "ספר בדיקה",
+            |  "language": "he",
+            |  "versionTitle": "merged",
+            |  "text": ["פסקה ראשונה"],
+            |  "versions": [["Vilna 1880", null], ["Warsaw 1900", null]]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve("Vilna 1880.json"),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "language": "he",
+            |  "versionTitle": "Vilna 1880",
+            |  "versionTitleInHebrew": "וילנא תר\"ם",
+            |  "text": ["פסקה נוסח וילנא"]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve("Warsaw 1900.json"),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "language": "he",
+            |  "versionTitle": "Warsaw 1900",
+            |  "text": ["פסקה נוסח ורשא"]
+            |}
+            """.trimMargin()
+        )
+
+        // Metadata-only book: one of its two meta rows is blocked globally.
+        val soloDir = Files.createDirectories(jsonDir.resolve("Solo Book"))
+        Files.writeString(
+            schemaDir.resolve("Solo_Book.json"),
+            """
+            |{
+            |  "schema": {
+            |    "title": "Solo Book",
+            |    "heTitle": "ספר יחיד",
+            |    "sectionNames": ["Paragraph"],
+            |    "heSectionNames": ["פסקה"],
+            |    "addressTypes": ["Integer"],
+            |    "depth": 1
+            |  },
+            |  "heCategories": ["תנך"]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            soloDir.resolve("merged.json"),
+            """
+            |{
+            |  "title": "Solo Book",
+            |  "heTitle": "ספר יחיד",
+            |  "language": "he",
+            |  "versionTitle": "merged",
+            |  "text": ["פסקה ראשונה"],
+            |  "versions": [["Solo Edition", null], ["Warsaw 1900", null]]
+            |}
+            """.trimMargin()
+        )
+
+        val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+        val logger = Logger.withTag("SefariaVersionsImportTest")
+        val reader = SefariaBookPayloadReader(json, logger)
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        val payloads = reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup)
+            .sortedBy { it.enTitle }
+
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sourceId = repo.insertSource("Sefaria-Test")
+        val catId = repo.insertCategory(Category(0, null, "תנך", level = 0, order = 1))
+
+        val lineKeyToId = mutableMapOf<Pair<String, Int>, Long>()
+        val inputs = payloads.mapIndexed { bookIdx, payload ->
+            val bookId = (bookIdx + 1).toLong()
+            val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
+            repo.insertBook(
+                Book(
+                    id = bookId, categoryId = catId, sourceId = sourceId,
+                    title = payload.heTitle, heRef = payload.heTitle,
+                    authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+                    heShortDesc = null, notesContent = null, order = bookId.toFloat(),
+                    topics = emptyList(), isBaseBook = false, totalLines = payload.lines.size,
+                    hasAltStructures = false, hasTeamim = false, hasNekudot = false,
+                )
+            )
+            repo.insertLinesBatch(
+                payload.lines.mapIndexed { idx, content ->
+                    val lineId = bookId * 100 + idx
+                    lineKeyToId[bookPath to idx] = lineId
+                    Line(id = lineId, bookId = bookId, lineIndex = idx, content = content, heRef = null)
+                }
+            )
+            SefariaVersionsImporter.BookInput(payload = payload, bookId = bookId, bookPath = bookPath)
+        }
+
+        // Warsaw 1900 blocked everywhere; Vilna blocked only in ספר בדיקה, by its Hebrew title.
+        val blacklist = parseVersionsBlacklist(
+            listOf("Warsaw 1900", "ספר בדיקה | וילנא תר\"ם"),
+            logger,
+        )
+        SefariaVersionsImporter(repo, InMemoryIdAllocator.load(path = null), json, reader, logger, blacklist)
+            .import(inputs, lineKeyToId)
+
+        val conn: Connection = driver.getConnection()
+        val versions = mutableListOf<Pair<String, String>>()
+        conn.createStatement().use { st ->
+            st.executeQuery("SELECT bookId, versionTitle FROM book_version ORDER BY bookId, versionTitle").use { rs ->
+                while (rs.next()) versions += rs.getString(1) to rs.getString(2)
+            }
+        }
+        // Solo Book keeps only Solo Edition; Test Book loses both editions.
+        assertEquals(listOf("1" to "Solo Edition"), versions)
+        conn.createStatement().use { st ->
+            st.executeQuery("SELECT COUNT(*) FROM version_line").use { rs ->
+                rs.next()
+                assertEquals(0, rs.getInt(1))
+            }
+        }
+
+        repo.close()
+    }
 }
