@@ -376,13 +376,14 @@ class DatabaseGenerator(
                 // ─── Phase 2: touched-book detection ────────────────────────
                 // Runs after manifestSourcesByRel is loaded so the BookKey we
                 // emit matches what the importer will record below
-                // (via getSourceNameFor + normalizeBookTitle).
+                // (via sourceNameForManifestKey + normalizeBookTitle).
                 val currentSourceHashes: Map<
                     BookKey,
                     io.github.kdroidfilter.seforimlibrary.common.buildstate.BookSourceHash,
                 > = runCatching {
                     OtzariaSourceHashComputer(
-                        sourceNameResolver = ::getSourceNameFor,
+                        sourceNameResolver = ::sourceNameForManifestKey,
+                        titleNormalizer = ::normalizeBookTitle,
                     ).compute(sourceDirectory, buildVersion)
                 }.getOrElse {
                     logger.w(it) { "Skipping Otzaria touched-book detection: ${it.message}" }
@@ -1183,6 +1184,22 @@ class DatabaseGenerator(
 
     private fun getSourceNameFor(file: Path): String {
         val rel = toLibraryRelativeKey(file)
+        return manifestSourcesByRel[rel] ?: "Unknown"
+    }
+
+    /**
+     * Source name for a **raw manifest key** (e.g. "DictaToOtzaria/…/אוצריא/…/X.txt").
+     * Unlike [getSourceNameFor] (which relativizes an imported file Path against
+     * [libraryRoot]), this reads the manifest key directly through the SAME
+     * [manifestSourcesByRel] map the importer uses, so the BookKey the source-hash
+     * detector emits matches exactly what the importer records. Used by
+     * [OtzariaSourceHashComputer]; see its docs for why a Path resolver fails here.
+     */
+    private fun sourceNameForManifestKey(manifestKey: String): String {
+        val parts = manifestKey.split('/')
+        val idx = parts.indexOf("אוצריא")
+        if (idx < 0 || idx == parts.size - 1) return "Unknown"
+        val rel = parts.drop(idx + 1).joinToString("/")
         return manifestSourcesByRel[rel] ?: "Unknown"
     }
 
