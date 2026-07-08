@@ -219,14 +219,51 @@ jobs:
       # bounded; the indexing stays well within budget.
       - name: Generate Seforim Database
         run: |
+          # -PlinkerSidecar makes the Sefaria import dump the RefEntry→lineId sidecar
+          # this build's LINKER Phase-2 needs (see next step).
           ./gradlew generateSeforimDb \
             -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
             -PdbVersion=${{ steps.discover.outputs.db_version }} \
             -PinMemoryDb=false \
+            -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
             --no-daemon --stacktrace
           # catalog.pb is no longer produced; drop any stale copy so a dirty
           # self-hosted workspace can't smuggle it into the bundle or a patch.
           rm -f build/catalog.pb
+
+      # Resolve the linker's ref-based artifacts into clickable LINKER links, IN this DB,
+      # before the patch fan + compress so both include them. Cross-cycle: consumes the
+      # latest linker_links.zst (previous linker run); safe to skip if none exists yet.
+      - name: Apply LINKER links (Phase-2)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf build/linker && mkdir -p build/linker
+          if gh release download -R Otzaria/LinkerToOtzaria \
+               --pattern 'linker_links.zst' --dir build/linker 2>/dev/null; then
+            tar --use-compress-program=unzstd -xf build/linker/linker_links.zst -C build/linker
+            ./gradlew :sefariasqlite:generateLinkerLinks \
+              -PseforimDb=$PWD/build/seforim.db \
+              -PlinkerArtifacts=$PWD/build/linker/artifacts \
+              -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
+              --no-daemon --stacktrace
+          else
+            echo "No linker_links.zst yet (cold start) — skipping LINKER links this build."
+          fi
+
+      # Dump the cleaned per-line content for the external linker (LinkerToOtzaria).
+      # Must run on THIS DB so citation offsets match the stored line text exactly.
+      # Published as a release asset; the linker's next run consumes it.
+      - name: Dump lines snapshot for the linker
+        run: |
+          set -euo pipefail
+          ./gradlew :packaging:dumpLines \
+            -PseforimDb=$PWD/build/seforim.db \
+            -PlinesSnapshot=$PWD/build/lines_snapshot.db \
+            --no-daemon --stacktrace
+          zstd -T0 -19 -f -o build/lines_snapshot.db.zst build/lines_snapshot.db
+          rm -f build/lines_snapshot.db
 
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
@@ -292,6 +329,8 @@ jobs:
           # Future releases reconstitute the prev DB from this.
           cp build/seforim.db.zst "$STAGE/"
           cp build/seforim.db.buildstate "$STAGE/"
+          # Lines snapshot for the linker (consumed by LinkerToOtzaria's next run).
+          cp build/lines_snapshot.db.zst "$STAGE/"
           # Patch fan (zero or more files; only present from release #2 on).
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
             cp patches/patch-*.db.zst "$STAGE/"
