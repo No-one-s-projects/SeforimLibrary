@@ -122,7 +122,7 @@ tasks.register<JavaExec>("generateLinkerLinks") {
     } else {
         systemProperty("seforimDb", rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath)
     }
-    for (p in listOf("linkerArtifacts", "linkerSidecar", "buildStatePath")) {
+    for (p in listOf("linkerArtifacts", "linkerSidecar", "buildStatePath", "linkerStrict")) {
         if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
     }
 

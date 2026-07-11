@@ -63,6 +63,17 @@ fun main(args: Array<String>) = runBlocking {
     ConnectionType.values().forEach { bindings.upsertConnectionType(it.name) }
     val ctLinker = bindings.upsertConnectionType(ConnectionType.LINKER.name)
 
+    // Havrouta links sit at implicit rowids ABOVE the persisted link counter (they are
+    // deleted+recreated each build outside the allocator), so allocating fresh LINKER
+    // ids straight from the counter would collide with them: the link INSERT OR IGNOREs
+    // away and its anchors attach to the Havrouta row. Raise the counter past the DB.
+    run {
+        var maxLinkId = 0L
+        driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM link",
+            { c -> if (c.next().value) maxLinkId = c.getLong(0) ?: 0L; QueryResult.Value(Unit) }, 0)
+        allocator.ensureCounterAtLeast(io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable.LINK, maxLinkId + 1)
+    }
+
     try {
         repository.executeRawQuery("PRAGMA foreign_keys = OFF")
         repository.executeRawQuery("PRAGMA synchronous = OFF")
@@ -118,19 +129,23 @@ fun main(args: Array<String>) = runBlocking {
             }, 0)
         logger.i { "DB maps: ${bookIdByKey.size} books, ${lineIdByBookLine.size} lines" }
 
-        // Content is fetched per source line only when a link/anchor needs it (a small subset of
-        // all lines), and cached so repeated citations of the same line hit memory, not SQLite.
-        val contentCache = HashMap<Long, String>()
-        fun contentFor(id: Long): String = contentCache.getOrPut(id) {
-            var s = ""
-            driver.executeQuery(1001, "SELECT content FROM line WHERE id = ?",
-                { c -> if (c.next().value) s = c.getString(0) ?: ""; QueryResult.Value(Unit) },
-                1) { bindLong(0, id) }
-            s
+        // Content is fetched per source line only when a link/anchor needs it. Cache exactly ONE
+        // line: artifact records are written per book in line order, so consecutive records hit
+        // the same line; an unbounded cache holds every linked line's text and OOMs (~GBs).
+        var cachedLineId = Long.MIN_VALUE
+        var cachedContent = ""
+        fun contentFor(id: Long): String {
+            if (id != cachedLineId) {
+                var s = ""
+                driver.executeQuery(1001, "SELECT content FROM line WHERE id = ?",
+                    { c -> if (c.next().value) s = c.getString(0) ?: ""; QueryResult.Value(Unit) },
+                    1) { bindLong(0, id) }
+                cachedLineId = id; cachedContent = s
+            }
+            return cachedContent
         }
         // linkerContentHash MUST match linker_artifact.content_hash so the source-drift guard agrees.
-        val hashCache = HashMap<Long, String>()
-        fun hashFor(id: Long): String = hashCache.getOrPut(id) { linkerContentHash(contentFor(id)) }
+        fun hashFor(id: Long): String = linkerContentHash(contentFor(id))
 
         // ── walk artifacts → links + anchors ──
         val json = Json { ignoreUnknownKeys = true }
@@ -195,6 +210,16 @@ fun main(args: Array<String>) = runBlocking {
         }
         flush()
         logger.i { "LINKER: $links links, $anchors anchors (unresolved target: $unresolvedTarget, unmapped source: $unmappedSource, stale source: $staleSource)" }
+
+        // Serial-pipeline invariant (-PlinkerStrict): the linker just ran on THIS build's
+        // snapshot, so every record's source line must exist and match its stamped hash.
+        // A violation means the artifacts came from some other snapshot — fail the build.
+        if (prop("linkerStrict", null)?.toBoolean() == true) {
+            check(unmappedSource == 0 && staleSource == 0) {
+                "linkerStrict: unmapped source=$unmappedSource, stale source=$staleSource — " +
+                    "artifacts do not match this build's snapshot"
+            }
+        }
 
         // LINKER links were inserted AFTER the Sefaria import's book_has_links pass, so refresh the
         // source/target flags — additively (never reset to 0) — or a book that gained ONLY linker
