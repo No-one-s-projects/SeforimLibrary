@@ -1368,6 +1368,10 @@ class DatabaseGenerator(
                 // SOURCE is declared from the dependant's file; like the Sefaria importer
                 // we flip it to canonical base→dependant and store it as COMMENTARY.
                 val declaredType = ConnectionType.fromString(linkData.connectionType)
+                // "linker"-typed rows are an old Dicta linker experiment (removed from
+                // otzaria-library, may linger in old zips) — never imported. The LINKER
+                // layer comes solely from LinkerToOtzaria's Phase-2.
+                if (declaredType == ConnectionType.LINKER) continue
                 val flip = declaredType == ConnectionType.SOURCE
                 val storedType = if (flip) ConnectionType.COMMENTARY else declaredType
                 // Stable link id keyed by (sourceLineId, targetLineId, connectionTypeId), like Sefaria.
