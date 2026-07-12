@@ -10,6 +10,7 @@ import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
@@ -96,10 +97,15 @@ fun main(args: Array<String>) = runBlocking {
         }
         val refsByCanonical = allRefs.groupBy { canonicalCitation(it.ref) }
         val refsByBase = HashMap<String, RefEntry>()
+        // lastByBase — the base's LAST segment: closes the scope of section-level
+        // citations (a whole amud/chapter) so the app can show/load the full range.
+        val lastByBase = HashMap<String, RefEntry>()
         for (e in allRefs) {
             val base = canonicalBase(e.ref)
             val existing = refsByBase[base]
             if (existing == null || e.lineIndex < existing.lineIndex) refsByBase[base] = e
+            val existingLast = lastByBase[base]
+            if (existingLast == null || e.lineIndex > existingLast.lineIndex) lastByBase[base] = e
         }
         logger.i { "Sidecar: ${allRefs.size} refs, ${refsByCanonical.size} canonical keys" }
 
@@ -153,6 +159,12 @@ fun main(args: Array<String>) = runBlocking {
         val anchorBatch = ArrayList<LinkAnchor>()
         val linkIdByPair = HashMap<Pair<Long, Long>, Long>()   // (src,tgt) → linkId (dedup links)
         val seenAnchor = HashSet<Triple<Long, Int, Int>>()      // (linkId, cs, ce) → dedup anchors
+        // linkId → (endLineId, endLineIndex): target-side scope end for multi-line
+        // citations (a whole amud/section or a dashed range). Written as link_range
+        // side=1 so the app shows the range in the title and loads the full content
+        // in the preview. Widest end wins when the same pair is cited at two scopes.
+        // No link_coverage rows — target-page surfacing stays first-line-only.
+        val rangeEndByLink = HashMap<Long, Pair<Long, Int>>()
         var links = 0; var anchors = 0; var unresolvedTarget = 0; var unmappedSource = 0; var staleSource = 0
 
         suspend fun flush() {
@@ -204,12 +216,35 @@ fun main(args: Array<String>) = runBlocking {
                         anchorBatch.add(LinkAnchor(linkId = linkId, side = 0, charStart = cs, charEnd = ce))
                         anchors++
                     }
+
+                    // Multi-line citation scope (whole amud/section or dashed range) →
+                    // remember its end for a link_range(side=1) row.
+                    val endEntry = resolveRefEnd(rec.target_ref, refsByCanonical, refsByBase, lastByBase)
+                    if (endEntry != null &&
+                        endEntry.path == tgtEntry.path &&
+                        endEntry.lineIndex > tgtEntry.lineIndex
+                    ) {
+                        val endLineId = lineIdByRefKey[endEntry.path to endEntry.lineIndex]
+                        val endMeta = endLineId?.let { lineMeta[it] }
+                        if (endLineId != null && endMeta != null) {
+                            val prev = rangeEndByLink[linkId]
+                            if (prev == null || endMeta.second > prev.second) {
+                                rangeEndByLink[linkId] = endLineId to endMeta.second
+                            }
+                        }
+                    }
                     if (linkBatch.size >= 5000) flush()
                 }
             }
         }
         flush()
-        logger.i { "LINKER: $links links, $anchors anchors (unresolved target: $unresolvedTarget, unmapped source: $unmappedSource, stale source: $staleSource)" }
+        if (rangeEndByLink.isNotEmpty()) {
+            val ranges = rangeEndByLink.map { (linkId, end) ->
+                LinkRange(linkId = linkId, side = 1, endLineId = end.first, endLineIndex = end.second)
+            }
+            ranges.chunked(5000).forEach { repository.insertLinkRangesBatch(it) }
+        }
+        logger.i { "LINKER: $links links, $anchors anchors, ${rangeEndByLink.size} target ranges (unresolved target: $unresolvedTarget, unmapped source: $unmappedSource, stale source: $staleSource)" }
 
         // Serial-pipeline invariant (-PlinkerStrict): the linker just ran on THIS build's
         // snapshot, so every record's source line must exist and match its stamped hash.
