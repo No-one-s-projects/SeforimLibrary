@@ -204,6 +204,9 @@ class SefariaDirectImporter(
         val tocInserter = SefariaTocInserter(repository, bindings)
         val altTocBuilder = SefariaAltTocBuilder(repository, bindings)
         val linksImporter = SefariaLinksImporter(repository, bindings, logger)
+        // Inputs for the inline-anchor pass (itags → link_anchor), collected in
+        // the book loop so the pass can run after links exist.
+        val anchorBookInputs = mutableListOf<SefariaInlineAnchors.BookInput>()
 
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
@@ -293,6 +296,16 @@ class SefariaDirectImporter(
 
             // Create a mapping from lineIndex to RefEntry for quick lookup
             val refsByLineIndex = payload.refEntries.associateBy { it.lineIndex - 1 }
+
+            anchorBookInputs += SefariaInlineAnchors.BookInput(
+                bookId = bookId,
+                enTitle = payload.enTitle,
+                bookPath = bookPath,
+                lines = payload.lines,
+                refsByLineIndex = refsByLineIndex,
+                singleVersionTitle = payload.singleVersionTitle,
+                cleanShiftByLineIndex = payload.cleanShiftByLineIndex,
+            )
 
             payload.lines.forEachIndexed { idx, content ->
                 val refEntry = refsByLineIndex[idx]
@@ -444,6 +457,7 @@ class SefariaDirectImporter(
         val linksDir = dbRoot.resolve("links")
         if (linksDir.exists()) {
             logger.i { "Processing links (${headingLineIds.size} heading lines will be excluded from link targets)..." }
+            val charLevelPending = java.util.concurrent.ConcurrentLinkedQueue<PendingCharLevelAnchor>()
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
                 refsByCanonical = refsByCanonical,
@@ -451,9 +465,28 @@ class SefariaDirectImporter(
                 lineKeyToId = lineKeyToId,
                 lineIdToBookId = lineIdToBookId,
                 bookMetaById = bookMetaById,
-                headingLineIds = headingLineIds
+                headingLineIds = headingLineIds,
+                charLevelPending = charLevelPending
             )
             logger.i { "Links processed" }
+
+            // Word-level anchors: resolve the itags embedded in base texts to
+            // the freshly inserted link rows (see SefariaInlineAnchors).
+            logger.i { "Resolving inline commentary anchors (itags)..." }
+            SefariaInlineAnchors(repository, logger).generate(
+                books = anchorBookInputs,
+                bookMetaById = bookMetaById,
+                refsByCanonical = refsByCanonical,
+                lineKeyToId = lineKeyToId,
+            )
+
+            // Char-level anchors from the quotation finder's charLevelData —
+            // exact-only (single-version + unmodified-line gates).
+            logger.i { "Resolving char-level anchors (charLevelData, ${charLevelPending.size} cells)..." }
+            SefariaCharLevelAnchors(repository, logger).generate(
+                pending = charLevelPending,
+                books = anchorBookInputs,
+            )
         }
 
         // Re-enable normal SQLite settings
