@@ -452,3 +452,11 @@ jobs:
           else
             echo "No tmpfs mount to release."
           fi
+
+      # The workspace persists between runs on this self-hosted runner and the next
+      # run may be a week away — don't park multi-GB leftovers (release copies, prev
+      # DBs from a mid-loop failure) on disk meanwhile. All of it is regenerated or
+      # re-downloaded by the next run.
+      - name: Clean run-scoped disk leftovers (workspace persists on self-hosted)
+        if: always()
+        run: rm -rf prev-dbs patches release-staging prior-versions.tsv
