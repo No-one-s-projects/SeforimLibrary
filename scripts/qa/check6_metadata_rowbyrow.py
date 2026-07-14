@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""בדיקה 6 (סעיף 10): השוואה שורה-שורה לפי heRef — dependenceType, collectiveTitleHe/En מול schemas."""
+"""בדיקה 6 (סעיף 10): השוואה שורה-שורה לפי heRef (ספרי source='Sefaria' בלבד) —
+dependenceType, collectiveTitleHe/En מול schemas."""
 import argparse
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, open_db, require_columns,
-                    resolve_schemas_dir, die)
+                    resolve_schemas_dir, sefaria_source_id, die)
 
 
 def main():
@@ -19,6 +20,9 @@ def main():
     conn = open_db(args.db)
     require_columns(conn, "book",
                     ["heRef", "dependenceType", "collectiveTitleHe", "collectiveTitleEn"])
+    # רק ספרי source='Sefaria': ספר ממקור אחר (למשל MoreBooks) ש-heRef שלו זהה במקרה
+    # ל-heTitle של schema אינו שייך להשוואה — המטא-דאטה הריק שלו אינו pass/fail.
+    src_id = sefaria_source_id(conn)
 
     schemas_dir = resolve_schemas_dir(args.sefaria_dir)
     books = load_schema_books(schemas_dir)
@@ -38,7 +42,8 @@ def main():
     matched = 0
     unmatched_with_meta = []
     for r in conn.execute(
-            "SELECT heRef, dependenceType, collectiveTitleHe, collectiveTitleEn FROM book"):
+            "SELECT heRef, dependenceType, collectiveTitleHe, collectiveTitleEn "
+            "FROM book WHERE sourceId = ?", (src_id,)):
         b = by_he.get(r["heRef"]) if r["heRef"] is not None else None
         if b is None:
             # ספר עם מטא-דאטת Sefaria (dependenceType/collectiveTitle*) חייב schema תואם.

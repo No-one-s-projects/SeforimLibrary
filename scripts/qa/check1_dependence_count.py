@@ -6,7 +6,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, normalize_title_key, open_db,
-                    require_columns, resolve_schemas_dir, die)
+                    require_columns, resolve_schemas_dir, sefaria_source_id, die)
 
 SNAPSHOT_TOTAL = 4941
 SNAPSHOT_BREAKDOWN = {"commentary": 4889, "targum": 45, "midrash": 5, "guides": 2}
@@ -23,16 +23,20 @@ def main():
 
     conn = open_db(args.db)
     require_columns(conn, "book", ["heRef", "dependenceType"])
+    # רק ספרי source='Sefaria': ספרי מקורות אחרים ששמם צירוף-מקרים זהה ל-schema לא ידלפו.
+    src_id = sefaria_source_id(conn)
 
     db_rows = conn.execute(
         "SELECT dependenceType AS d, COUNT(*) AS c FROM book "
-        "WHERE dependenceType IS NOT NULL GROUP BY dependenceType").fetchall()
+        "WHERE sourceId = ? AND dependenceType IS NOT NULL GROUP BY dependenceType",
+        (src_id,)).fetchall()
     db_breakdown = {r["d"]: r["c"] for r in db_rows}
     db_total = sum(db_breakdown.values())
 
     # התאמה לפי heRef ולא title: 6 ספרים תלויים משוני-שם בייבוא (title משתנה, heRef נשאר heTitle).
     db_norm_herefs = set()
-    for r in conn.execute("SELECT heRef FROM book WHERE heRef IS NOT NULL"):
+    for r in conn.execute("SELECT heRef FROM book WHERE sourceId = ? AND heRef IS NOT NULL",
+                          (src_id,)):
         n = normalize_title_key(r["heRef"])
         if n is not None:
             db_norm_herefs.add(n)

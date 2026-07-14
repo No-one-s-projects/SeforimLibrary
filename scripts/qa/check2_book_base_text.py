@@ -6,7 +6,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, normalize_title_key, open_db,
-                    require_columns, resolve_schemas_dir, die,
+                    require_columns, resolve_schemas_dir, sefaria_source_id, die,
                     default_priority_list_path, load_priority_list,
                     order_books_by_priority, build_normalized_title_to_bookid)
 
@@ -27,10 +27,14 @@ def main():
     conn = open_db(args.db)
     require_columns(conn, "book", ["heRef"])
     require_columns(conn, "book_base_text", ["bookId", "baseBookId"])
+    # רק ספרי source='Sefaria': בלי הסינון, ספר ממקור אחר (למשל MoreBooks) ששמו זהה
+    # במקרה ל-heTitle של schema היה נתפס כיעד רזולוציה ומעוות את הזוגות הצפויים.
+    src_id = sefaria_source_id(conn)
 
     # מיפוי heRef-DB מנורמל → bookId (heRef == payload.heTitle; title עשוי להשתנות בייבוא).
     db_id_by_he = {}
-    for r in conn.execute("SELECT id, heRef FROM book WHERE heRef IS NOT NULL"):
+    for r in conn.execute("SELECT id, heRef FROM book WHERE sourceId = ? AND heRef IS NOT NULL",
+                          (src_id,)):
         n = normalize_title_key(r["heRef"])
         if n is not None:
             db_id_by_he.setdefault(n, r["id"])
@@ -57,6 +61,7 @@ def main():
             if base_id is not None:
                 expected_pairs.add((dbid, base_id))
 
+    # book_base_text נקרא במלואו (ללא סינון source): שורה של ספר לא-Sefaria תופיע כ"עודף" ותיכשל בקול.
     db_pairs = {(r["bookId"], r["baseBookId"])
                 for r in conn.execute("SELECT bookId, baseBookId FROM book_base_text")}
 

@@ -277,6 +277,17 @@ def open_db(db_path):
     return conn
 
 
+def sefaria_source_id(conn):
+    # id שורת source בשם 'Sefaria' — בדיקות 1/2/6 מסננות אליו את book (book.sourceId),
+    # אחרת ספרי מקורות אחרים (למשל MoreBooks) ששמם צירוף-מקרים זהה ל-schema דולפים פנימה.
+    require_columns(conn, "book", ["sourceId"])
+    require_columns(conn, "source", ["id", "name"])
+    row = conn.execute("SELECT id FROM source WHERE name = 'Sefaria'").fetchone()
+    if row is None:
+        die("אין שורת source בשם 'Sefaria' ב-DB")
+    return row["id"]
+
+
 def require_columns(conn, table, cols):
     have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
     if not have:

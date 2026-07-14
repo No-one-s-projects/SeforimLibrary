@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""בדיקה 7 (סעיף 10): דרגת baseProvenance — inferred(1)/declared(2), סדר SOURCE (מוצהר>מוסק>ללא)."""
+"""בדיקה 7 (סעיף 10): דרגת baseProvenance — inferred(1)/declared(2), הרכב דרגות פר ספר-מקור.
+
+סדר ה-SOURCE עצמו (ORDER BY של ה-mirror query) אינו נבדק כאן — סקריפט SQL אינו יכול
+לאמת ORDER BY בלי לשכפל אותו (טאוטולוגיה). הוא מכוסה בבדיקת האינטגרציה של ה-dao:
+SeforimRepositoryIntegrationTest.`SOURCE view orders by baseProvenance DESC ahead of
+all tie-breakers` (קומיט f92c99c), הרצה מול השאילתה האמיתית selectInverseLinksByTargetLineIds."""
 import argparse
 import sys
 import os
@@ -14,7 +19,7 @@ SNAPSHOT_INFERRED_PAIRS = 20       # זוגות ספרים מוסקים
 _MIRROR_TYPES = ("COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH",
                  "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT", "ELUCIDATION")
 _MIRROR_TYPES_SQL = "(" + ",".join("'%s'" % t for t in _MIRROR_TYPES) + ")"
-_MIRROR_SAMPLE = 25                # ספרי-יעד לדגימת סדר ה-provenance
+_MIRROR_SAMPLE = 25                # ספרי-מקור לדגימת הרכב דרגות ה-provenance
 
 
 def main():
@@ -72,8 +77,9 @@ def main():
         die(f"{len(off)} זוגות מוצהרים (source,target) בקישורים שאינם ב-book_base_text "
             f"בכיוון base→dependant: {sample}")
 
-    # (ג) סדר SOURCE (סעיף 4.2): שכפול ORDER BY של ה-mirror query — מוצהר>מוסק>ללא.
-    _verify_mirror_provenance_order(conn)
+    # (ג) הרכב דרגות פר ספר-מקור (סעיף 4.2) — אימות נתונים בלבד; סדר ה-SOURCE עצמו
+    # מכוסה בבדיקת ה-dao (ראו docstring).
+    _verify_tier_composition(conn)
 
     if args.expect_snapshot:
         if inferred_total != SNAPSHOT_INFERRED:
@@ -81,16 +87,15 @@ def main():
         if len(inferred_pairs) != SNAPSHOT_INFERRED_PAIRS:
             die(f"snapshot: זוגות מוסקים={len(inferred_pairs)} != {SNAPSHOT_INFERRED_PAIRS}")
 
-    print("PASS: baseProvenance עקבי; סדר SOURCE מוצהר>מוסק>ללא")
+    print("PASS: baseProvenance עקבי; הרכב דרגות תקין (סדר ה-SOURCE — בבדיקת ה-dao)")
     sys.exit(0)
 
 
-def _verify_mirror_provenance_order(conn):
-    # תצוגת ה-SOURCE (סעיף 4.2): לספר-מקור נתון, קישוריו מסודרים ב-ORDER BY של ה-mirror query
-    # (LinkQueries.sq:selectInverseLinksByTargetLineIds, ~שורה 201 — הועתק מילה-במילה), מסונן
-    # לסוגי ה-COMMENTARY. דוגם את ספרי-המקור עם מירב דרגות ה-provenance ומאמת שבכל אחד רצף
-    # ה-provenance לא-עולה. ה-ORDER BY מבטיח non-increasing אריתמטית, ולכן ההגנה נגד PASS
-    # ריק היא הדרישה שלפחות ספר-מקור אחד בדגימה חושף בפועל את שלוש הדרגות declared>inferred>none.
+def _verify_tier_composition(conn):
+    # אימות ברמת הנתונים, בלי לטעון לבדיקת סדר-שאילתה: דוגם את ספרי-המקור עם מירב דרגות
+    # ה-provenance בסוגי ה-mirror, ולכל ספר מוודא שהרכב הדרגות (0/1/2) שנספר שורה-שורה
+    # תואם GROUP BY ישיר. ההגנה נגד PASS ריק: לפחות ספר-מקור אחד בדגימה חייב לשאת בפועל
+    # את שלוש הדרגות declared/inferred/none בכפיפה אחת.
     sources = conn.execute(
         "SELECT l.sourceBookId AS sb, COUNT(DISTINCT l.baseProvenance) AS d, COUNT(*) AS c "
         "FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId "
@@ -100,26 +105,29 @@ def _verify_mirror_provenance_order(conn):
     if not sources:
         die("אף ספר-מקור אינו נושא קישורים ב-≥2 דרגות provenance — דגימה לא-מייצגת, כשל")
 
+    base_sql = ("FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId "
+                f"WHERE l.sourceBookId = ? AND ct.name IN {_MIRROR_TYPES_SQL} "
+                "AND l.sourceBookId != l.targetBookId")
     saw_all_three = False
     for row in sources:
         sb = row["sb"]
-        provs = [r["p"] for r in conn.execute(
-            "SELECT l.baseProvenance AS p FROM link l "
-            "JOIN connection_type ct ON ct.id = l.connectionTypeId "
-            "JOIN book b ON b.id = l.targetBookId "
-            "JOIN line sl ON sl.id = l.sourceLineId "
-            f"WHERE l.sourceBookId = ? AND ct.name IN {_MIRROR_TYPES_SQL} "
-            "AND l.sourceBookId != l.targetBookId "
-            "ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex",
-            (sb,))]
-        if provs != sorted(provs, reverse=True):
-            die(f"סדר SOURCE של ספר {sb} אינו יורד ב-baseProvenance: {provs[:20]}")
-        if {0, 1, 2} <= set(provs):
+        counted = {}
+        for r in conn.execute("SELECT l.baseProvenance AS p " + base_sql, (sb,)):
+            counted[r["p"]] = counted.get(r["p"], 0) + 1
+        grouped = {r["p"]: r["c"] for r in conn.execute(
+            "SELECT l.baseProvenance AS p, COUNT(*) AS c " + base_sql +
+            " GROUP BY l.baseProvenance", (sb,))}
+        if counted != grouped:
+            die(f"הרכב דרגות לספר {sb}: ספירה שורה-שורה {counted} != GROUP BY {grouped}")
+        if {0, 1, 2} <= set(counted):
             saw_all_three = True
     if not saw_all_three:
-        die("אף ספר-מקור בדגימה אינו מכיל את שלוש הדרגות (declared>inferred>none) — "
+        die("אף ספר-מקור בדגימה אינו נושא את שלוש הדרגות (declared/inferred/none) — "
             "דגימה לא-מייצגת, כשל למניעת PASS ריק")
-    print(f"  סדר SOURCE תקין על {len(sources)} ספרי-מקור; דגימה מייצגת (מוצהר>מוסק>ללא נצפו)")
+    print(f"  הרכב דרגות תקין על {len(sources)} ספרי-מקור; שלוש הדרגות (2/1/0) נצפו בדגימה")
+    print("  סדר ה-SOURCE עצמו (ORDER BY baseProvenance DESC) מכוסה בבדיקת ה-dao: "
+          "SeforimRepositoryIntegrationTest.`SOURCE view orders by baseProvenance DESC "
+          "ahead of all tie-breakers` (f92c99c)")
 
 
 if __name__ == "__main__":
