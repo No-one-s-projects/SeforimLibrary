@@ -307,6 +307,29 @@ jobs:
             -PlinkerStrict=true \
             --no-daemon --stacktrace
 
+      # ─── QA gate on the full DB (§10) ──────────────────────────────────────
+      # Runs after LINKER inject so the DB is complete. --require-all makes any
+      # skipped check a hard failure (e.g. a missing metrics report), so a
+      # release can never publish with §10.5 silently un-run. The metrics report
+      # is emitted at the Sefaria stage; on the full DB check5 compares per-type
+      # counts with ≥ semantics automatically (no --sefaria-stage — the DB has
+      # also accumulated havrouta/otzaria/linker links by now).
+      #
+      # --expect-snapshot is intentionally NOT passed: inputs are unpinned (plan
+      # 10א — git clone --depth 1 of Sefaria HEAD), so the snapshot baselines
+      # drift; each check derives its expected values from THIS build's schemas.
+      # python3 (stdlib only) is the runtime; verify it like the deps script does
+      # for sqlite3, then fail the job on any nonzero exit.
+      - name: QA — run §10 checks on the full DB (required)
+        run: |
+          set -euo pipefail
+          command -v python3
+          python3 scripts/qa/run_all.py \
+            --db build/seforim.db \
+            --sefaria-dir generator/sefariasqlite/build/sefaria \
+            --metrics build/seforim.db.link-import-metrics.json \
+            --require-all
+
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
       # Each iteration downloads + decompresses, runs the producer, then
