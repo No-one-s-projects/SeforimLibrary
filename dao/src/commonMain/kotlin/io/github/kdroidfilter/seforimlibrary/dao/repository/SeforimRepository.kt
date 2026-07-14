@@ -677,23 +677,26 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d{"Linked author $authorId to book $bookId"}
     }
 
-    // Record a declared base-text relation (dependent book -> its base book).
+    /**
+     * Records a declared base-text relation ([bookId] depends on [baseBookId]).
+     * Idempotent: re-inserting an existing pair is a no-op (ON CONFLICT DO NOTHING).
+     */
     suspend fun insertBookBaseText(bookId: Long, baseBookId: Long) = withContext(Dispatchers.IO) {
         database.bookBaseTextQueriesQueries.insert(bookId, baseBookId)
     }
 
-    // Remove all base-text relations of a book (re-import).
+    /** Removes all base-text relations of [bookId] (used before re-import). */
     suspend fun deleteBookBaseTexts(bookId: Long) = withContext(Dispatchers.IO) {
         database.bookBaseTextQueriesQueries.deleteByBook(bookId)
     }
 
-    // Base books of a given dependent book.
+    /** Returns the base books that [bookId] depends on, ordered by orderIndex then title. */
     suspend fun getBaseBooks(bookId: Long): List<Book> = withContext(Dispatchers.IO) {
         database.bookBaseTextQueriesQueries.selectBasesByBook(bookId).executeAsList()
             .map { it.toModel(json) }
     }
 
-    // Dependent books of a given base book.
+    /** Returns the books that depend on [baseBookId], ordered by orderIndex then title. */
     suspend fun getDependentBooks(baseBookId: Long): List<Book> = withContext(Dispatchers.IO) {
         database.bookBaseTextQueriesQueries.selectDependentsByBase(baseBookId).executeAsList()
             .map { it.toModel(json) }

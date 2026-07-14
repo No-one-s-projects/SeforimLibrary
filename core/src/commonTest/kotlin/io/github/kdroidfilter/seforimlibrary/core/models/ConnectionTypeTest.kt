@@ -7,19 +7,17 @@ import kotlin.test.assertNull
 class ConnectionTypeTest {
 
     @Test
-    fun linkerOrdinalStableAndNamedTypesAppendAfter() {
-        assertEquals(14, ConnectionType.LINKER.ordinal)
+    fun declarationOrderIsFrozen() {
+        // Ids are seeded from declaration order (id = ordinal + 1): any reorder,
+        // insertion, or removal below silently remaps existing DB rows.
         val expected = listOf(
-            ConnectionType.SIFREI_MITZVOT,
-            ConnectionType.ESSAY,
-            ConnectionType.ALLUSION,
-            ConnectionType.LITURGY,
-            ConnectionType.ELUCIDATION,
-            ConnectionType.EXPLICATION,
-            ConnectionType.LAW,
-            ConnectionType.SUMMARY,
+            "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "REFERENCE", "SOURCE",
+            "MIDRASH", "QUOTATION", "MESORAT_HASHAS", "EIN_MISHPAT", "DIBUR_HAMATCHIL",
+            "PARSHANUT", "MISHNAH_IN_TALMUD", "RELATED", "OTHER", "LINKER",
+            "SIFREI_MITZVOT", "ESSAY", "ALLUSION", "LITURGY", "ELUCIDATION",
+            "EXPLICATION", "LAW", "SUMMARY",
         )
-        expected.forEachIndexed { i, t -> assertEquals(15 + i, t.ordinal) }
+        assertEquals(expected, ConnectionType.values().map { it.name })
     }
 
     @Test
