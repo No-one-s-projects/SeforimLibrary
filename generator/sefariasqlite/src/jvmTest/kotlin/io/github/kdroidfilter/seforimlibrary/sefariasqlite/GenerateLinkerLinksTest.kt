@@ -75,10 +75,23 @@ class GenerateLinkerLinksTest {
     }
 
     @Test
-    fun linkerConnectionTypeIsWiredAndAppendedLast() {
+    fun linkerConnectionTypeIsWiredAndOrdinalIsStable() {
         assertEquals(ConnectionType.LINKER, ConnectionType.fromString("linker"))
-        // Appended last so existing ordinals — and therefore stable ids — don't shift.
-        assertEquals(ConnectionType.LINKER, ConnectionType.values().last())
+        // LINKER stays ordinal 14 so ids 1–15 don't shift; named types append after it.
+        assertEquals(14, ConnectionType.LINKER.ordinal)
+        val afterLinker = listOf(
+            ConnectionType.SIFREI_MITZVOT,
+            ConnectionType.ESSAY,
+            ConnectionType.ALLUSION,
+            ConnectionType.LITURGY,
+            ConnectionType.ELUCIDATION,
+            ConnectionType.EXPLICATION,
+            ConnectionType.LAW,
+            ConnectionType.SUMMARY,
+        )
+        afterLinker.forEachIndexed { i, t ->
+            assertEquals(15 + i, t.ordinal)
+        }
     }
 
     @Test

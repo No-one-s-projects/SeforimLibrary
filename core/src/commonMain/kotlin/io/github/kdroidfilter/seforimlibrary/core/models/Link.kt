@@ -81,6 +81,16 @@ enum class ConnectionType {
      * view (it is not a base/dependant relation). See LINKER_DELTA_PLAN.md.
      */
     LINKER,
+
+    // Named Sefaria connection types, appended after LINKER to keep ids 1–15 stable.
+    SIFREI_MITZVOT,
+    ESSAY,
+    ALLUSION,
+    LITURGY,
+    ELUCIDATION,
+    EXPLICATION,
+    LAW,
+    SUMMARY,
     ;
 
     companion object {
@@ -91,7 +101,13 @@ enum class ConnectionType {
          * whitespace and underscore/space variations are normalized. Unknown
          * values fall back to [OTHER].
          */
-        fun fromString(value: String): ConnectionType {
+        fun fromString(value: String): ConnectionType = fromKnownStringOrNull(value) ?: OTHER
+
+        /**
+         * Strict variant of [fromString]: returns `null` for unrecognized values
+         * instead of falling back to [OTHER]. Empty/`"none"`/`"other"` map to [OTHER].
+         */
+        fun fromKnownStringOrNull(value: String): ConnectionType? {
             val v = value.trim().lowercase().replace(' ', '_')
             return when (v) {
                 "commentary" -> COMMENTARY
@@ -108,8 +124,16 @@ enum class ConnectionType {
                 "mishnah_in_talmud" -> MISHNAH_IN_TALMUD
                 "related", "related_passage" -> RELATED
                 "linker" -> LINKER
-                "", "none" -> OTHER
-                else -> OTHER
+                "sifrei_mitzvot" -> SIFREI_MITZVOT
+                "essay" -> ESSAY
+                "allusion" -> ALLUSION
+                "liturgy" -> LITURGY
+                "ellucidation", "elucidation" -> ELUCIDATION
+                "explication" -> EXPLICATION
+                "law" -> LAW
+                "summary" -> SUMMARY
+                "", "none", "other" -> OTHER
+                else -> null
             }
         }
     }
