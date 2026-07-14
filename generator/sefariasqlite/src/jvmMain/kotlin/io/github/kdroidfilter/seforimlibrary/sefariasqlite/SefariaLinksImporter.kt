@@ -498,7 +498,7 @@ internal class SefariaLinksImporter(
      */
     suspend fun demoteCrossCorpusDependantLinks() {
         val dependantTypes = listOf(
-            "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH", "PARSHANUT",
+            "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH", "PARSHANUT", "ELUCIDATION",
         ).joinToString(",") { "'$it'" }
         // Build a temp table (bookId, corpusKey) for every book — corpusKey
         // is the top-level Sefaria-category title the book transitively
@@ -629,7 +629,7 @@ internal class SefariaLinksImporter(
         // Keep this list in sync with the mirror SOURCE queries in LinkQueries.sq.
         val dependantTypes = listOf(
             "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH",
-            "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT",
+            "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT", "ELUCIDATION",
         ).joinToString(",") { "'$it'" }
         repository.executeRawQuery(
             "UPDATE book SET hasSourceConnection=1 WHERE id IN (" +
@@ -795,6 +795,7 @@ private val ORIENTED_DEPENDANT_TYPES = setOf(
     // earlier in the priority list than MT/SA/Tur), which makes the Talmud
     // tractate appear in the code's SOURCE virtual view.
     ConnectionType.EIN_MISHPAT,
+    ConnectionType.ELUCIDATION,
 )
 
 /**
