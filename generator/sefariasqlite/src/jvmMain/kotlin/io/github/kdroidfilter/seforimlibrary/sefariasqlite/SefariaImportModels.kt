@@ -34,8 +34,12 @@ internal data class BookMeta(
     // Sefaria's own `base_text_titles` declaration in the schema. Inference and
     // density chaining never mutate this set. Used by the SOURCE virtual view
     // to boost Sefaria-confirmed bases above lateral citations (e.g. Mishnah
-    // Avot above Tehillim for Nachalat Avot on Pirkei Avot).
+    // Avot above Tehillim for Nachalat Avot on Pirkei Avot). → baseProvenance=2.
     val sefariaDeclaredBaseTextBookIds: Set<Long> = emptySet(),
+    // Bases recovered from the title's "X on Y" pattern (no `base_text_titles`
+    // in schema). Disjoint from the declared set; density chaining never
+    // mutates it. → baseProvenance=1 (declared wins if a book is in both).
+    val inferredBaseTextBookIds: Set<Long> = emptySet(),
     // Schema-derived: Sefaria's `collective_title.en` — the commentator name shared
     // across all volumes of a multi-volume work (e.g. "Rashi" for "Rashi on Genesis",
     // "Rashi on Exodus"…). Used by the density chain to aggregate per-collective
@@ -62,11 +66,17 @@ internal data class BookPayload(
     val heShortDesc: String?,
     val pubDates: List<PubDate>,
     val altStructures: List<AltStructurePayload>,
-    // Schema metadata used for link orientation. baseTextTitleKeys holds the
-    // *normalized* titles (en+he) of declared base texts; resolution to bookIds
-    // happens in a second pass once all books have been inserted.
+    // Schema metadata used for link orientation. The *Keys lists hold the
+    // *normalized* titles (en+he) of base texts; resolution to bookIds happens
+    // in a second pass once all books have been inserted.
     val dependence: Dependence? = null,
-    val baseTextTitleKeys: List<String> = emptyList(),
+    // Raw `dependence` value (trim + lowercase), persisted to book.dependenceType.
+    val rawDependence: String? = null,
+    // From schema `base_text_titles` — provenance SEFARIA_DECLARED.
+    val declaredBaseTextTitleKeys: List<String> = emptyList(),
+    // Recovered from the "X on Y" title pattern — provenance INFERRED_TITLE.
+    val inferredBaseTextTitleKeys: List<String> = emptyList(),
+    val collectiveTitleHe: String? = null,
     val collectiveTitleEn: String? = null,
     // All Sefaria-known aliases for the book (titleVariants + heTitleVariants),
     // normalized. Indexed alongside the primary titles in normalizedTitleToBookId

@@ -526,6 +526,36 @@ class SeforimRepositoryIntegrationTest {
         )
     }
 
+    @Test
+    fun `link baseProvenance round-trips through insert and read`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val categoryId = repository.insertCategory(
+            Category(parentId = null, title = "Cat", level = 0, order = 1)
+        )
+        val baseBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Base", order = 1f)
+        )
+        val depBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Dep", order = 2f)
+        )
+        val baseLineId = repository.insertLine(Line(bookId = baseBookId, lineIndex = 0, content = "base"))
+        val depLineId = repository.insertLine(Line(bookId = depBookId, lineIndex = 0, content = "dep"))
+
+        val linkId = repository.insertLink(
+            Link(
+                sourceBookId = baseBookId,
+                targetBookId = depBookId,
+                sourceLineId = baseLineId,
+                targetLineId = depLineId,
+                targetLineIndex = 0,
+                connectionType = ConnectionType.COMMENTARY,
+                baseProvenance = 2,
+            )
+        )
+
+        assertEquals(2, repository.getLink(linkId)?.baseProvenance)
+    }
+
     // ==================== Virtual SOURCE view tests ====================
 
     // Validates the single-direction storage + virtual SOURCE view contract:

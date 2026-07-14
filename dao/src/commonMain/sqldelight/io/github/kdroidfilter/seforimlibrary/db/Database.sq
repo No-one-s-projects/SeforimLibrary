@@ -340,12 +340,10 @@ CREATE TABLE IF NOT EXISTS link (
     targetLineIndex INTEGER NOT NULL,
     targetBookOrderIndex INTEGER NOT NULL,
     connectionTypeId INTEGER NOT NULL,
-    -- 1 when this link's orientation was decided by an explicit Sefaria
-    -- `base_text_titles` match (target.baseTextBookIds contains source).
-    -- 0 for density-chained, priorityRank-fallback, or unoriented links.
-    -- Used to boost Sefaria-declared bases above lateral citations in the
-    -- SOURCE virtual view's ORDER BY clause.
-    isDeclaredBase INTEGER NOT NULL DEFAULT 0,
+    -- Orientation provenance: 0=NONE, 1=INFERRED_TITLE ("X on Y" parse),
+    -- 2=SEFARIA_DECLARED (`base_text_titles`). Boosts declared > inferred >
+    -- lateral citations in the SOURCE virtual view's ORDER BY clause.
+    baseProvenance INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (sourceBookId) REFERENCES book(id) ON DELETE CASCADE,
     FOREIGN KEY (targetBookId) REFERENCES book(id) ON DELETE CASCADE,
     FOREIGN KEY (sourceLineId) REFERENCES line(id) ON DELETE CASCADE,

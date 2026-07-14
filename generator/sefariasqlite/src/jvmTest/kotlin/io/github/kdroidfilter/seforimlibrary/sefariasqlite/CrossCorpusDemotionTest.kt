@@ -53,7 +53,7 @@ class CrossCorpusDemotionTest {
 
         fun link(src: Long, tgt: Long) = Link(
             sourceBookId = src, targetBookId = tgt, sourceLineId = src * 10, targetLineId = tgt * 10,
-            targetLineIndex = 0, connectionType = ConnectionType.COMMENTARY, isDeclaredBase = false,
+            targetLineIndex = 0, connectionType = ConnectionType.COMMENTARY, baseProvenance = 0,
         )
         repo.insertLink(link(1, 2)) // ברכות → חתם סופר (cross-corpus) — must demote
         repo.insertLink(link(1, 3)) // ברכות → רש"י (same corpus) — must stay

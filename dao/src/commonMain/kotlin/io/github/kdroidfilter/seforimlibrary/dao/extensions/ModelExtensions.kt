@@ -354,7 +354,7 @@ fun io.github.kdroidfilter.seforimlibrary.db.SelectLinkById.toModel(): Link {
         targetLineId = targetLineId,
         targetLineIndex = targetLineIndex.toInt(),
         connectionType = ConnectionType.fromString(connectionType),
-        isDeclaredBase = isDeclaredBase == 1L,
+        baseProvenance = baseProvenance.toInt(),
     )
 }
 
@@ -372,7 +372,7 @@ fun io.github.kdroidfilter.seforimlibrary.db.SelectLinksBySourceLineIds.toModel(
         targetLineId = targetLineId,
         targetLineIndex = targetLineIndex.toInt(),
         connectionType = ConnectionType.fromString(connectionType),
-        isDeclaredBase = isDeclaredBase == 1L,
+        baseProvenance = baseProvenance.toInt(),
     )
 }
 
@@ -405,7 +405,7 @@ fun io.github.kdroidfilter.seforimlibrary.db.SelectLinksBySourceBook.toModel(): 
         targetLineId = targetLineId,
         targetLineIndex = targetLineIndex.toInt(),
         connectionType = ConnectionType.fromString(connectionType),
-        isDeclaredBase = isDeclaredBase == 1L,
+        baseProvenance = baseProvenance.toInt(),
     )
 }
 

@@ -133,20 +133,21 @@ internal class SefariaBookPayloadReader(
             val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
             val altStructures = parseAltStructures(schemaJson)
-            val dependence = extractDependence(schemaJson, schemaObj)
-            val rawBaseTextKeys = extractBaseTextTitleKeys(schemaJson, schemaObj)
+            val rawDependence = extractRawDependence(schemaJson, schemaObj)
+            val dependence = rawDependence?.let(::mapDependence)
+            val declaredBaseTextTitleKeys = extractBaseTextTitleKeys(schemaJson, schemaObj)
             // When Sefaria didn't ship `base_text_titles` (≈ 74 books, e.g.
             // Nachalat Avot on Avot, Bartenura on Torah, Ralbag on Torah),
-            // try to recover the declared base from the title's "X on Y" /
-            // "X על Y" pattern. The extracted Y will be resolved against
-            // titleAliasKeys at first-pass to produce a canonical bookId.
-            val baseTextTitleKeys = if (rawBaseTextKeys.isEmpty() && dependence != null) {
-                rawBaseTextKeys + extractBaseKeysFromTitle(englishTitle, hebrewTitle)
+            // try to recover the base from the title's "X on Y" / "X על Y"
+            // pattern. Kept separate from declared keys — provenance INFERRED.
+            val inferredBaseTextTitleKeys = if (declaredBaseTextTitleKeys.isEmpty() && dependence != null) {
+                extractBaseKeysFromTitle(englishTitle, hebrewTitle)
             } else {
-                rawBaseTextKeys
+                emptyList()
             }
-            val collectiveTitleEn = (schemaJson["collective_title"] as? JsonObject)
-                ?.get("en")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            val collectiveTitleObj = schemaJson["collective_title"] as? JsonObject
+            val collectiveTitleEn = collectiveTitleObj?.get("en")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            val collectiveTitleHe = collectiveTitleObj?.get("he")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
             val titleAliasKeys = extractTitleAliasKeys(schemaJson, schemaObj)
 
             BookPayload(
@@ -162,7 +163,10 @@ internal class SefariaBookPayloadReader(
                 pubDates = pubDates,
                 altStructures = altStructures,
                 dependence = dependence,
-                baseTextTitleKeys = baseTextTitleKeys,
+                rawDependence = rawDependence,
+                declaredBaseTextTitleKeys = declaredBaseTextTitleKeys,
+                inferredBaseTextTitleKeys = inferredBaseTextTitleKeys,
+                collectiveTitleHe = collectiveTitleHe,
                 collectiveTitleEn = collectiveTitleEn,
                 titleAliasKeys = titleAliasKeys,
                 singleVersionTitle = singleVersionTitle,
@@ -249,16 +253,17 @@ internal class SefariaBookPayloadReader(
         return out.distinct()
     }
 
-    private fun extractDependence(schemaJson: JsonObject, schemaObj: JsonObject): Dependence? {
-        val raw = (schemaJson["dependence"]?.stringOrNull() ?: schemaObj["dependence"]?.stringOrNull())
-            ?.trim()?.lowercase() ?: return null
-        return when (raw) {
-            "commentary", "sub-commentary", "supercommentary", "super-commentary",
-            "super_commentary" -> Dependence.COMMENTARY
-            "targum" -> Dependence.TARGUM
-            "midrash" -> Dependence.MIDRASH
-            else -> Dependence.OTHER_DEPENDANT
-        }
+    // Raw `dependence` after trim + canonical lowercasing; null when absent.
+    private fun extractRawDependence(schemaJson: JsonObject, schemaObj: JsonObject): String? =
+        (schemaJson["dependence"]?.stringOrNull() ?: schemaObj["dependence"]?.stringOrNull())
+            ?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+
+    private fun mapDependence(raw: String): Dependence = when (raw) {
+        "commentary", "sub-commentary", "supercommentary", "super-commentary",
+        "super_commentary" -> Dependence.COMMENTARY
+        "targum" -> Dependence.TARGUM
+        "midrash" -> Dependence.MIDRASH
+        else -> Dependence.OTHER_DEPENDANT
     }
 
     private fun extractBaseTextTitleKeys(schemaJson: JsonObject, schemaObj: JsonObject): List<String> {

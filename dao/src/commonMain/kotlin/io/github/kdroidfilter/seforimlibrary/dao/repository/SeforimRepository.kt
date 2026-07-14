@@ -2166,7 +2166,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 targetLineIndex = link.targetLineIndex.toLong(),
                 targetBookOrderIndex = resolveBookOrderIndex(link.targetBookId),
                 connectionTypeId = connectionTypeId,
-                isDeclaredBase = if (link.isDeclaredBase) 1L else 0L,
+                baseProvenance = link.baseProvenance.toLong(),
             )
             val linkId = database.linkQueriesQueries.lastInsertRowId().executeAsOne()
             logger.d{"Repository inserted link with ID: $linkId"}
@@ -2223,7 +2223,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     ?: error("Missing connection type id for ${link.connectionType.name}")
                 val targetBookOrderIndex = resolveBookOrderIndex(link.targetBookId)
 
-                val declaredFlag: Long = if (link.isDeclaredBase) 1L else 0L
+                val provenance: Long = link.baseProvenance.toLong()
                 if (link.id > 0) {
                     database.linkQueriesQueries.insertWithId(
                         id = link.id,
@@ -2234,7 +2234,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                         targetLineIndex = link.targetLineIndex.toLong(),
                         targetBookOrderIndex = targetBookOrderIndex,
                         connectionTypeId = connectionTypeId,
-                        isDeclaredBase = declaredFlag,
+                        baseProvenance = provenance,
                     )
                 } else {
                     database.linkQueriesQueries.insert(
@@ -2245,7 +2245,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                         targetLineIndex = link.targetLineIndex.toLong(),
                         targetBookOrderIndex = targetBookOrderIndex,
                         connectionTypeId = connectionTypeId,
-                        isDeclaredBase = declaredFlag,
+                        baseProvenance = provenance,
                     )
                 }
             }
@@ -2962,7 +2962,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         targetLineId: Long,
         targetLineIndex: Long,
         connectionTypeId: Long,
-        isDeclaredBase: Boolean = false,
+        baseProvenance: Int = 0,
     ) = withContext(Dispatchers.IO) {
         database.linkQueriesQueries.insertWithId(
             id = id,
@@ -2973,7 +2973,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             targetLineIndex = targetLineIndex,
             targetBookOrderIndex = resolveBookOrderIndex(targetBookId),
             connectionTypeId = connectionTypeId,
-            isDeclaredBase = if (isDeclaredBase) 1L else 0L,
+            baseProvenance = baseProvenance.toLong(),
         )
     }
 

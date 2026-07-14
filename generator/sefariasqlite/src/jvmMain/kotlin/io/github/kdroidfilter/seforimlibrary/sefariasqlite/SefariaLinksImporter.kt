@@ -278,17 +278,20 @@ internal class SefariaLinksImporter(
                         val typeId = bindings.upsertConnectionType(storedType.name)
                         val linkId = bindings.allocator.linkId(storedSrcLine, storedTgtLine, typeId)
 
-                        // Flag: was this orientation chosen because the target's
-                        // schema **explicitly declares** the source as a base text?
-                        // Only true for Sefaria-declared `base_text_titles` matches
-                        // — NOT for density chaining, primary-base inference, or
-                        // priorityRank fallback. Used by the SOURCE virtual view
-                        // to boost Sefaria-confirmed bases above lateral citations
-                        // (e.g. Mishnah Avot at #1 for Nachalat Avot, even though
-                        // Tehillim has 4× more citations).
+                        // Provenance of the base→dependant orientation: 2 when the
+                        // target's schema **explicitly declares** the source as a
+                        // base text (`base_text_titles`), 1 when it was recovered
+                        // from the "X on Y" title pattern, 0 otherwise (density
+                        // chaining, primary-base inference, priorityRank fallback,
+                        // unoriented). Declared wins over inferred. Boosts declared
+                        // bases above lateral citations in the SOURCE view.
                         val storedTgtMeta = bookMetaById[storedTgtBook]
-                        val isDeclaredBase = storedTgtMeta != null &&
-                            storedSrcBook in storedTgtMeta.sefariaDeclaredBaseTextBookIds
+                        val baseProvenance = when {
+                            storedTgtMeta == null -> 0
+                            storedSrcBook in storedTgtMeta.sefariaDeclaredBaseTextBookIds -> 2
+                            storedSrcBook in storedTgtMeta.inferredBaseTextBookIds -> 1
+                            else -> 0
+                        }
 
                         linkChannel.send(
                             Link(
@@ -299,7 +302,7 @@ internal class SefariaLinksImporter(
                                 targetLineId = storedTgtLine,
                                 targetLineIndex = storedTgtLineIndex,
                                 connectionType = storedType,
-                                isDeclaredBase = isDeclaredBase,
+                                baseProvenance = baseProvenance,
                             )
                         )
 
@@ -546,7 +549,7 @@ internal class SefariaLinksImporter(
         repository.executeRawQuery(
             """
             UPDATE link SET connectionTypeId = (SELECT id FROM connection_type WHERE name='RELATED' LIMIT 1)
-            WHERE isDeclaredBase = 0
+            WHERE baseProvenance = 0
               AND connectionTypeId IN (SELECT id FROM connection_type WHERE name IN ($dependantTypes))
               AND EXISTS (
                 SELECT 1

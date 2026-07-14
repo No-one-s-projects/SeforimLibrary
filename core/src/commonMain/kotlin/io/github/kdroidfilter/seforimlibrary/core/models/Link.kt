@@ -31,18 +31,12 @@ data class Link(
     val targetLineIndex: Int,
     val connectionType: ConnectionType,
     /**
-     * `true` when the orientation of this link was determined by an explicit
-     * Sefaria-declared `base_text_titles` match (i.e. the target book's schema
-     * declares the source book as its base text). `false` for orientations
-     * inferred via density chaining, isBaseBook/priorityRank fallback, or
-     * unoriented types.
-     *
-     * Used by the SOURCE virtual view's ORDER BY to surface Sefaria-declared
-     * bases above lateral citations in books that cite Tanakh extensively
-     * while having a smaller declared base (e.g. Nachalat Avot on Pirkei Avot
-     * where Mishnah Avot has 93 links but Tehillim citations dominate at 371).
+     * Provenance of this link's base→dependant orientation: 0=NONE,
+     * 1=INFERRED_TITLE ("X on Y" title parse), 2=SEFARIA_DECLARED
+     * (`base_text_titles`). Used by the SOURCE virtual view's ORDER BY to
+     * surface declared bases above inferred ones above lateral citations.
      */
-    val isDeclaredBase: Boolean = false,
+    val baseProvenance: Int = 0,
 )
 
 /**

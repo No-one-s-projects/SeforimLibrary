@@ -194,10 +194,13 @@ class SefariaDirectImporter(
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
-        // Deferred base_text_titles → bookId resolution. We can't resolve at
+        // Deferred base-text-key → bookId resolution. We can't resolve at
         // book-insert time because a commentary's base text may not have been
-        // inserted yet. Resolved in a second pass after the main loop.
-        val pendingBaseTextKeysByBookId = ConcurrentHashMap<Long, List<String>>()
+        // inserted yet. Resolved in a second pass after the main loop. Declared
+        // (base_text_titles) and inferred ("X on Y") keys stay in separate maps
+        // so their provenance can be distinguished.
+        val pendingDeclaredKeysByBookId = ConcurrentHashMap<Long, List<String>>()
+        val pendingInferredKeysByBookId = ConcurrentHashMap<Long, List<String>>()
 
         // Batch insertions
         val lineBatch = mutableListOf<Line>()
@@ -253,6 +256,9 @@ class SefariaDirectImporter(
                 pubDates = resolvedPubDates,
                 heShortDesc = payload.heShortDesc,
                 heDesc = payload.description,
+                dependenceType = payload.rawDependence,
+                collectiveTitleHe = payload.collectiveTitleHe,
+                collectiveTitleEn = payload.collectiveTitleEn,
                 notesContent = null,
                 order = bookOrder,
                 topics = emptyList(),
@@ -290,8 +296,11 @@ class SefariaDirectImporter(
                 baseTextBookIds = emptySet(),
                 collectiveTitleEn = payload.collectiveTitleEn,
             )
-            if (payload.baseTextTitleKeys.isNotEmpty()) {
-                pendingBaseTextKeysByBookId[bookId] = payload.baseTextTitleKeys
+            if (payload.declaredBaseTextTitleKeys.isNotEmpty()) {
+                pendingDeclaredKeysByBookId[bookId] = payload.declaredBaseTextTitleKeys
+            }
+            if (payload.inferredBaseTextTitleKeys.isNotEmpty()) {
+                pendingInferredKeysByBookId[bookId] = payload.inferredBaseTextTitleKeys
             }
 
             val refsForBook = payload.refEntries.map { it.copy(path = bookPath) }
@@ -433,31 +442,41 @@ class SefariaDirectImporter(
             dumpLinkerSidecar(sidecarPath, allRefsWithPath, lineKeyToId)
         }
 
-        // Resolve deferred base_text_titles → bookIds now that every book has been
-        // inserted and normalizedTitleToBookId is fully populated. This gives the
-        // link orientation resolver explicit base→dependant edges instead of the
-        // priorityRank heuristic.
-        if (pendingBaseTextKeysByBookId.isNotEmpty()) {
-            var resolved = 0
-            var unresolved = 0
-            pendingBaseTextKeysByBookId.forEach { (bookId, keys) ->
-                val ids = keys.mapNotNullTo(HashSet()) { normalizedTitleToBookId[it] }
-                resolved += ids.size
-                unresolved += keys.size - ids.size
-                if (ids.isNotEmpty()) {
-                    val meta = bookMetaById[bookId] ?: return@forEach
-                    // Set BOTH baseTextBookIds (for resolver) and the strict
-                    // Sefaria-declared subset (for SOURCE view boost). Subsequent
-                    // inference/density passes will only mutate `baseTextBookIds`.
-                    bookMetaById[bookId] = meta.copy(
-                        baseTextBookIds = ids,
-                        sefariaDeclaredBaseTextBookIds = ids,
-                    )
+        // Resolve deferred base-text keys → bookIds now that every book has been
+        // inserted and normalizedTitleToBookId is fully populated. Declared and
+        // inferred keys are resolved into separate sets: baseTextBookIds (for the
+        // orientation resolver) is their union — preserving existing direction
+        // behavior — while the provenance sets stay disjoint. book_base_text is
+        // written from the DECLARED set only (metadata fidelity, not UI ranking).
+        run {
+            val bookIds = HashSet<Long>().apply {
+                addAll(pendingDeclaredKeysByBookId.keys)
+                addAll(pendingInferredKeysByBookId.keys)
+            }
+            var declaredHits = 0
+            var inferredHits = 0
+            var baseTextRows = 0
+            for (bookId in bookIds) {
+                val declaredIds = pendingDeclaredKeysByBookId[bookId]
+                    ?.mapNotNullTo(HashSet()) { normalizedTitleToBookId[it] } ?: HashSet()
+                val inferredIds = pendingInferredKeysByBookId[bookId]
+                    ?.mapNotNullTo(HashSet()) { normalizedTitleToBookId[it] } ?: HashSet()
+                declaredHits += declaredIds.size
+                inferredHits += inferredIds.size
+                val meta = bookMetaById[bookId] ?: continue
+                bookMetaById[bookId] = meta.copy(
+                    baseTextBookIds = declaredIds + inferredIds,
+                    sefariaDeclaredBaseTextBookIds = declaredIds,
+                    inferredBaseTextBookIds = inferredIds,
+                )
+                for (baseBookId in declaredIds) {
+                    repository.insertBookBaseText(bookId, baseBookId)
+                    baseTextRows++
                 }
             }
             logger.i {
-                "Resolved base_text_titles for ${pendingBaseTextKeysByBookId.size} books " +
-                    "($resolved title→bookId hits, $unresolved misses)"
+                "Resolved base-text keys for ${bookIds.size} books " +
+                    "($declaredHits declared, $inferredHits inferred hits; $baseTextRows book_base_text rows)"
             }
         }
 
