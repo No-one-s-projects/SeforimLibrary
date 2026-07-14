@@ -172,6 +172,8 @@ internal fun resolveSchemaVersion(dbPath: Path, propKey: String): Int {
     System.getProperty(propKey)?.let { explicit ->
         return explicit.toIntOrNull() ?: error("-P$propKey='$explicit' is not an integer")
     }
+    // Guard before JDBC: sqlite would create an empty file at a bad path.
+    check(Files.exists(dbPath)) { "DB not found at $dbPath — cannot read schema_meta.db_schema_version" }
     val stamped = DriverManager.getConnection("jdbc:sqlite:${dbPath.toAbsolutePath()}").use { conn ->
         conn.prepareStatement("SELECT value FROM schema_meta WHERE key = 'db_schema_version'").use { ps ->
             ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
