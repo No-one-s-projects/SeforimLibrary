@@ -40,7 +40,13 @@ fun main(args: Array<String>) {
     require(Files.exists(prevPath)) { "prev not found at $prev" }
     require(Files.exists(newPath)) { "new not found at $new" }
 
-    logger.i { "Producing patch $prev → $new at $out (v$from → v$to)" }
+    // Schema versions signed into the manifest must reflect the real DBs, not
+    // a hard-coded "1". Precedence: explicit -P override, else schema_meta of
+    // the DB itself; hard-fail if neither is available (no silent default).
+    val fromSchemaVersion = resolveSchemaVersion(prevPath, "fromSchemaVersion")
+    val toSchemaVersion = resolveSchemaVersion(newPath, "toSchemaVersion")
+
+    logger.i { "Producing patch $prev → $new at $out (v$from → v$to, schema $fromSchemaVersion → $toSchemaVersion)" }
     val output = PatchDbProducer(logger).produce(
         prevDb = prevPath,
         newDb = newPath,
@@ -118,8 +124,8 @@ fun main(args: Array<String>) {
         patchFile = outPath,
         fromVersion = from,
         toVersion = to,
-        fromSchemaVersion = (System.getProperty("fromSchemaVersion") ?: "1").toInt(),
-        toSchemaVersion = (System.getProperty("toSchemaVersion") ?: "1").toInt(),
+        fromSchemaVersion = fromSchemaVersion,
+        toSchemaVersion = toSchemaVersion,
         fromContentHash = DriverManager.getConnection("jdbc:sqlite:${prevPath.toAbsolutePath()}").use {
             LogicalContentHasher().compute(it)
         },
@@ -155,4 +161,24 @@ fun main(args: Array<String>) {
             ),
         )
     }
+}
+
+/**
+ * Resolves a DB's schema version for the manifest. Explicit `-P<propKey>`
+ * wins; otherwise reads `schema_meta.db_schema_version` from the DB. Hard
+ * fails when neither is available — no silent default (no-fallbacks policy).
+ */
+internal fun resolveSchemaVersion(dbPath: Path, propKey: String): Int {
+    System.getProperty(propKey)?.let { explicit ->
+        return explicit.toIntOrNull() ?: error("-P$propKey='$explicit' is not an integer")
+    }
+    val stamped = DriverManager.getConnection("jdbc:sqlite:${dbPath.toAbsolutePath()}").use { conn ->
+        conn.prepareStatement("SELECT value FROM schema_meta WHERE key = 'db_schema_version'").use { ps ->
+            ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+        }
+    }
+    return stamped?.toIntOrNull() ?: error(
+        "schema_meta.db_schema_version missing (or non-integer) in $dbPath and no -P$propKey supplied — " +
+            "stamp the DB via StampSchemaVersionCli or pass -P$propKey explicitly; refusing to guess a schema version",
+    )
 }
