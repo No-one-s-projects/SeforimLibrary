@@ -612,4 +612,117 @@ class SeforimRepositoryIntegrationTest {
 
         assertEquals(lastLineId, maxId)
     }
+
+    // ==================== Book dependence-metadata Tests ====================
+
+    @Test
+    fun `insertBook round-trips dependence metadata`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val categoryId = repository.insertCategory(Category(parentId = null, title = "Torah", level = 0, order = 1))
+        val bookId = repository.insertBook(
+            Book(
+                categoryId = categoryId,
+                sourceId = sourceId,
+                title = "Rashi on Genesis",
+                order = 1f,
+                dependenceType = "Commentary",
+                collectiveTitleHe = "רש\"י",
+                collectiveTitleEn = "Rashi"
+            )
+        )
+
+        val book = repository.getBook(bookId)
+        assertNotNull(book)
+        assertEquals("Commentary", book.dependenceType)
+        assertEquals("רש\"י", book.collectiveTitleHe)
+        assertEquals("Rashi", book.collectiveTitleEn)
+    }
+
+    @Test
+    fun `insertBook leaves dependence metadata null by default`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val categoryId = repository.insertCategory(Category(parentId = null, title = "Torah", level = 0, order = 1))
+        val bookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Genesis", order = 1f)
+        )
+
+        val book = repository.getBook(bookId)
+        assertNotNull(book)
+        assertNull(book.dependenceType)
+        assertNull(book.collectiveTitleHe)
+        assertNull(book.collectiveTitleEn)
+    }
+
+    // ==================== book_base_text junction Tests ====================
+
+    @Test
+    fun `book_base_text select returns bases and dependents`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+        val depId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+
+        repository.insertBookBaseText(depId, baseId)
+
+        val bases = repository.getBaseBooks(depId)
+        assertEquals(1, bases.size)
+        assertEquals(baseId, bases.first().id)
+
+        val dependents = repository.getDependentBooks(baseId)
+        assertEquals(1, dependents.size)
+        assertEquals(depId, dependents.first().id)
+    }
+
+    @Test
+    fun `insertBookBaseText is idempotent on duplicate`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+        val depId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+
+        repository.insertBookBaseText(depId, baseId)
+        repository.insertBookBaseText(depId, baseId)
+
+        assertEquals(1, repository.getBaseBooks(depId).size)
+    }
+
+    @Test
+    fun `deleteBookBaseTexts removes relations of a book`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+        val depId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+        repository.insertBookBaseText(depId, baseId)
+
+        repository.deleteBookBaseTexts(depId)
+
+        assertTrue(repository.getBaseBooks(depId).isEmpty())
+    }
+
+    @Test
+    fun `deleting a book cascades book_base_text on both sides`() = runBlocking {
+        // Dedicated FK-enforcing driver: the shared repository driver leaves FKs off.
+        val fkDriver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        fkDriver.execute(null, "PRAGMA foreign_keys=ON", 0)
+        val repo = SeforimRepository(":memory:", fkDriver)
+        try {
+            val sourceId = repo.insertSource("Sefaria")
+            val catId = repo.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+            val baseId = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+            val depId = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+            repo.insertBookBaseText(depId, baseId)
+
+            // Deleting the base book removes the row via baseBookId cascade.
+            fkDriver.execute(null, "DELETE FROM book WHERE id = $baseId", 0)
+            assertTrue(repo.getBaseBooks(depId).isEmpty())
+
+            // Re-create and delete from the dependent side.
+            val baseId2 = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Exodus", order = 3f))
+            repo.insertBookBaseText(depId, baseId2)
+            fkDriver.execute(null, "DELETE FROM book WHERE id = $depId", 0)
+            assertTrue(repo.getDependentBooks(baseId2).isEmpty())
+        } finally {
+            fkDriver.close()
+        }
+    }
 }

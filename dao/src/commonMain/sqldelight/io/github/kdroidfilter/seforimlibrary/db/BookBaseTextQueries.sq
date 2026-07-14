@@ -1,0 +1,28 @@
+-- Queries for the book_base_text junction table (declared base-text relations)
+
+-- Pure junction: delta upserts are ON CONFLICT DO NOTHING.
+insert:
+INSERT INTO book_base_text (bookId, baseBookId)
+VALUES (?, ?)
+ON CONFLICT (bookId, baseBookId) DO NOTHING;
+
+-- Base books of a given dependent book.
+selectBasesByBook:
+SELECT b.* FROM book b
+JOIN book_base_text bbt ON b.id = bbt.baseBookId
+WHERE bbt.bookId = ?
+ORDER BY b.orderIndex, b.title;
+
+-- Dependent books of a given base book.
+selectDependentsByBase:
+SELECT b.* FROM book b
+JOIN book_base_text bbt ON b.id = bbt.bookId
+WHERE bbt.baseBookId = ?
+ORDER BY b.orderIndex, b.title;
+
+-- Remove all base relations of a book (re-import).
+deleteByBook:
+DELETE FROM book_base_text WHERE bookId = ?;
+
+countAll:
+SELECT COUNT(*) FROM book_base_text;

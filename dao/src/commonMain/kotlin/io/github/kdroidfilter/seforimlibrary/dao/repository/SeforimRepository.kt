@@ -677,6 +677,28 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d{"Linked author $authorId to book $bookId"}
     }
 
+    // Record a declared base-text relation (dependent book -> its base book).
+    suspend fun insertBookBaseText(bookId: Long, baseBookId: Long) = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.insert(bookId, baseBookId)
+    }
+
+    // Remove all base-text relations of a book (re-import).
+    suspend fun deleteBookBaseTexts(bookId: Long) = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.deleteByBook(bookId)
+    }
+
+    // Base books of a given dependent book.
+    suspend fun getBaseBooks(bookId: Long): List<Book> = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.selectBasesByBook(bookId).executeAsList()
+            .map { it.toModel(json) }
+    }
+
+    // Dependent books of a given base book.
+    suspend fun getDependentBooks(baseBookId: Long): List<Book> = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.selectDependentsByBase(baseBookId).executeAsList()
+            .map { it.toModel(json) }
+    }
+
     suspend fun getBookByTitle(title: String): Book? = withContext(Dispatchers.IO) {
         val bookData = database.bookQueriesQueries.selectByTitle(title).executeAsOneOrNull() ?: return@withContext null
         val authors = getBookAuthors(bookData.id)
@@ -920,7 +942,10 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 hasSourceConnection = if (book.hasSourceConnection) 1 else 0,
                 hasAltStructures = if (book.hasAltStructures) 1 else 0,
                 hasTeamim = if (book.hasTeamim) 1 else 0,
-                hasNekudot = if (book.hasNekudot) 1 else 0
+                hasNekudot = if (book.hasNekudot) 1 else 0,
+                dependenceType = book.dependenceType,
+                collectiveTitleHe = book.collectiveTitleHe,
+                collectiveTitleEn = book.collectiveTitleEn
             )
             logger.d{"Used insertWithId for book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}"}
 
@@ -979,7 +1004,10 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 hasSourceConnection = if (book.hasSourceConnection) 1 else 0,
                 hasAltStructures = if (book.hasAltStructures) 1 else 0,
                 hasTeamim = if (book.hasTeamim) 1 else 0,
-                hasNekudot = if (book.hasNekudot) 1 else 0
+                hasNekudot = if (book.hasNekudot) 1 else 0,
+                dependenceType = book.dependenceType,
+                collectiveTitleHe = book.collectiveTitleHe,
+                collectiveTitleEn = book.collectiveTitleEn
             )
             val id = database.bookQueriesQueries.lastInsertRowId().executeAsOne()
             logger.d{"Used insert for book '${book.title}', got ID: $id with categoryId: ${book.categoryId}"}

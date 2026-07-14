@@ -38,6 +38,10 @@ data class Book(
     val pubDates: List<PubDate> = emptyList(),
     val heShortDesc: String? = null,
     val heDesc: String? = null,
+    // Raw case-normalized dependence from Sefaria schema; isDependant derived = != null.
+    val dependenceType: String? = null,
+    val collectiveTitleHe: String? = null,
+    val collectiveTitleEn: String? = null,
     // Legacy column, no longer populated: "הערות על <title>" files are imported
     // as standalone books linked via links/*.json.
     val notesContent: String? = null,
