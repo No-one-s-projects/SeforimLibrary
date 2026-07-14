@@ -158,7 +158,7 @@ internal class SefariaLinksImporter(
         logger.i {
             buildString {
                 append("Sefaria links importer per-type counters:")
-                for ((name, t) in metrics.perType) {
+                for ((name, t) in metrics.insertedByType) {
                     append("\ntype=$name rowsRead=${t.rowsRead}")
                     append(" dropped=${t.dropped}")
                     append(" resolvedPairs=${t.resolvedPairs}")
@@ -169,8 +169,12 @@ internal class SefariaLinksImporter(
     }
 
     /**
-     * Structured snapshot of the per-type counters, sorted by type name
-     * (deterministic key order). Valid after [processLinksInParallel] returns.
+     * Structured snapshot of the INSERT-TIME per-type counters, sorted by type
+     * name (deterministic key order). Valid after [processLinksInParallel]
+     * returns. These carry PRE-demotion semantics: `written` is keyed by the
+     * type at insertion, before [demoteCrossCorpusDependantLinks] retypes any
+     * cross-corpus dependant link to RELATED. For the authoritative final split
+     * query the DB via [persistedCountsByType] after demotion.
      */
     fun metricsSnapshot(): LinkImportMetrics {
         val names = (rowsReadByType.keys + rowsDroppedByType.keys +
@@ -188,6 +192,17 @@ internal class SefariaLinksImporter(
             }
         )
     }
+
+    /**
+     * Authoritative final per-type link counts, read from the DB and sorted by
+     * type name (deterministic key order). Call AFTER
+     * [demoteCrossCorpusDependantLinks] to capture the persisted split (which
+     * differs from insert-time [metricsSnapshot] wherever a cross-corpus
+     * dependant link was retyped to RELATED). Demotion only retypes rows, so
+     * the total must equal Σ insert-time `written`.
+     */
+    suspend fun persistedCountsByType(): Map<String, Long> =
+        repository.countLinksGroupedByType().toSortedMap()
 
     private suspend fun processLinkFile(
         file: Path,
@@ -735,15 +750,41 @@ internal data class LinkImportTypeMetrics(
     val written: Long,
 )
 
-/** Per-type metrics keyed by [ConnectionType] name, sorted for determinism. */
+/**
+ * Insert-time per-type metrics keyed by [ConnectionType] name, sorted for
+ * determinism. Carries PRE-demotion semantics — see [metricsSnapshot]. The
+ * final persisted split is obtained separately via [persistedCountsByType] and
+ * surfaced alongside this in [LinkImportMetricsReport].
+ */
 @kotlinx.serialization.Serializable
-internal data class LinkImportMetrics(val perType: Map<String, LinkImportTypeMetrics>)
+internal data class LinkImportMetrics(val insertedByType: Map<String, LinkImportTypeMetrics>)
+
+/**
+ * Machine-checkable link-import metrics JSON, written next to seforim.db for QA
+ * checks (QA plan §10.5). Shape is deterministic (declared key order; maps are
+ * sorted by type name).
+ *
+ * - [dbSchemaVersion]/[dbVersion]: read from the persisted DB's `schema_meta`
+ *   (null until the pipeline's later stampSchemaVersion stage stamps them).
+ * - [dbSizeBytes]: on-disk size of the persisted DB the report describes.
+ * - [insertedByType]: PRE-demotion insert-time counters (see [LinkImportTypeMetrics]).
+ * - [persistedByType]: authoritative POST-demotion `name → COUNT(*)` from `link`.
+ *   Σ persistedByType == Σ insertedByType.written (demotion only retypes rows).
+ */
+@kotlinx.serialization.Serializable
+internal data class LinkImportMetricsReport(
+    @kotlinx.serialization.SerialName("db_schema_version") val dbSchemaVersion: String?,
+    @kotlinx.serialization.SerialName("db_version") val dbVersion: String?,
+    @kotlinx.serialization.SerialName("db_size_bytes") val dbSizeBytes: Long,
+    val insertedByType: Map<String, LinkImportTypeMetrics>,
+    val persistedByType: Map<String, Long>,
+)
 
 private val metricsReportJson = Json { prettyPrint = true }
 
 /** JSON form written next to seforim.db for machine QA checks. */
-internal fun LinkImportMetrics.toJsonReport(): String =
-    metricsReportJson.encodeToString(LinkImportMetrics.serializer(), this)
+internal fun LinkImportMetricsReport.toJsonReport(): String =
+    metricsReportJson.encodeToString(LinkImportMetricsReport.serializer(), this)
 
 // Sefaria's aggregate summary exports (header `Text 1,Text 2,Link Count`), not
 // per-link data — skipped by exact filename per the no-fallbacks policy.

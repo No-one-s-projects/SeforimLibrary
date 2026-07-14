@@ -38,8 +38,14 @@ class SefariaDirectImporter(
     private val bindings = IdAllocatorBindings(allocator, repository)
     private val sourceName = "Sefaria"
 
-    // Per-type link-import metrics, set once the links phase ran (null otherwise).
+    // Insert-time (PRE-demotion) per-type link-import metrics, set once the links
+    // phase ran (null otherwise). See [SefariaLinksImporter.metricsSnapshot].
     internal var linkImportMetrics: LinkImportMetrics? = null
+        private set
+
+    // Authoritative POST-demotion per-type link counts (name → COUNT(*)), read
+    // from the DB after demoteCrossCorpusDependantLinks(). Null unless links ran.
+    internal var persistedLinkCountsByType: Map<String, Long>? = null
         private set
 
     suspend fun import() = coroutineScope {
@@ -566,6 +572,20 @@ class SefariaDirectImporter(
         logger.i { "Demoting cross-corpus dependant links per Sefaria categorisation..." }
         linksImporter.demoteCrossCorpusDependantLinks()
         linksImporter.updateBookHasLinks()
+
+        // Capture the authoritative post-demotion per-type split. Demotion only
+        // retypes rows (never adds/removes), so Σ persisted must equal Σ insert-
+        // time written — fail loudly if the invariant breaks.
+        linkImportMetrics?.let { inserted ->
+            val persisted = linksImporter.persistedCountsByType()
+            val insertedWrittenSum = inserted.insertedByType.values.sumOf { it.written }
+            val persistedSum = persisted.values.sum()
+            check(insertedWrittenSum == persistedSum) {
+                "Link metrics invariant violated: Σ insertedByType.written=$insertedWrittenSum " +
+                    "!= Σ persistedByType=$persistedSum (demotion only retypes rows, never adds/removes)"
+            }
+            persistedLinkCountsByType = persisted
+        }
 
         // Persist current source hashes for next build's touched-book detection.
         // We only record hashes for books that actually went through the importer

@@ -1707,6 +1707,34 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         count
     }
 
+    /**
+     * Authoritative final per-connection-type link counts:
+     * `SELECT ct.name, COUNT(*) FROM link JOIN connection_type GROUP BY name`.
+     * Reflects the DB's current state — call AFTER any retyping (e.g. cross-corpus
+     * demotion) to obtain the persisted split. Types with zero rows are absent.
+     */
+    suspend fun countLinksGroupedByType(): Map<String, Long> = withContext(Dispatchers.IO) {
+        val result = LinkedHashMap<String, Long>()
+        driver.executeQuery(
+            identifier = null,
+            sql = """
+                SELECT ct.name, COUNT(*)
+                FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
+                GROUP BY ct.name
+            """.trimIndent(),
+            mapper = { cursor: SqlCursor ->
+                while (cursor.next().value) {
+                    val name = cursor.getString(0)
+                    val count = cursor.getLong(1)
+                    if (name != null && count != null) result[name] = count
+                }
+                QueryResult.Value(Unit)
+            },
+            parameters = 0
+        ).await()
+        result
+    }
+
     suspend fun getCommentariesForLines(
         lineIds: List<Long>,
         activeCommentatorIds: Set<Long> = emptySet(),
