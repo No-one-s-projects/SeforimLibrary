@@ -41,6 +41,19 @@ internal class SefariaLinksImporter(
     private val rangeReversed = LongAdder()
     private val rangedRowsDropped = LongAdder()
 
+    // Per-connection-type importer counters (QA plan §10.5). Thread-safe — link
+    // files are processed in parallel. rowsRead/dropped are ROW-level, keyed by
+    // the raw csv-mapped type (OTHER for blank/none rows); resolvedPairs/written
+    // are PAIR-level, keyed by the FINAL per-pair type (after blank→schema upgrade).
+    private val rowsReadByType = ConcurrentHashMap<ConnectionType, LongAdder>()
+    private val rowsDroppedByType = ConcurrentHashMap<ConnectionType, LongAdder>()
+    private val resolvedPairsByType = ConcurrentHashMap<ConnectionType, LongAdder>()
+    private val linksWrittenByType = ConcurrentHashMap<ConnectionType, LongAdder>()
+
+    private fun ConcurrentHashMap<ConnectionType, LongAdder>.bump(type: ConnectionType) {
+        computeIfAbsent(type) { LongAdder() }.increment()
+    }
+
     suspend fun processLinksInParallel(
         linksDir: Path,
         refsByCanonical: Map<String, List<RefEntry>>,
@@ -136,6 +149,22 @@ internal class SefariaLinksImporter(
                 "end-unresolved=${rangeEndUnresolved.sum()}, reversed=${rangeReversed.sum()}, " +
                 "rows dropped with unresolved citation=${rangedRowsDropped.sum()}"
         }
+
+        // Per-connection-type importer summary (QA plan §10.5). rowsRead/dropped
+        // are keyed by the raw csv-mapped type; resolvedPairs/written by final type.
+        val allTypes = (rowsReadByType.keys + rowsDroppedByType.keys +
+            resolvedPairsByType.keys + linksWrittenByType.keys).sortedBy { it.name }
+        logger.i {
+            buildString {
+                append("Sefaria links importer per-type counters:")
+                for (t in allTypes) {
+                    append("\ntype=${t.name} rowsRead=${rowsReadByType[t]?.sum() ?: 0}")
+                    append(" dropped=${rowsDroppedByType[t]?.sum() ?: 0}")
+                    append(" resolvedPairs=${resolvedPairsByType[t]?.sum() ?: 0}")
+                    append(" written=${linksWrittenByType[t]?.sum() ?: 0}")
+                }
+            }
+        }
     }
 
     private suspend fun processLinkFile(
@@ -173,16 +202,21 @@ internal class SefariaLinksImporter(
                 error("Link file '$fileName' is missing required header(s): $missing")
             }
 
+            // 1-based CSV line number (header consumed above = line 1).
+            var lineNumber = 1
             while (iter.hasNext()) {
+                lineNumber++
                 val row = parseCsvLine(iter.next())
                 if (row.isEmpty()) continue
+                val conn = row.getOrNull(idxConn)?.trim().orEmpty()
+                // Validate the type BEFORE the empty-citation skip: an unmapped type
+                // must fail the build even on rows whose citations are blank/unresolved.
+                val csvConnectionType = mapCsvConnectionType(conn, "$fileName:$lineNumber")
                 val c1 = normalizeCitation(row.getOrNull(idxC1).orEmpty())
                 val c2 = normalizeCitation(row.getOrNull(idxC2).orEmpty())
                 if (c1.isEmpty() || c2.isEmpty()) continue
-                val conn = row.getOrNull(idxConn)?.trim().orEmpty()
-                // Validate the type BEFORE the resolveRefs skip: an unmapped type
-                // must fail the build even on rows whose citations don't resolve.
-                val csvConnectionType = mapCsvConnectionType(conn, fileName)
+                rowsReadByType.bump(csvConnectionType)
+                var rowWroteLink = false
                 // `Conection Type` is blank for ~36% of CSV rows. We try to
                 // recover those via schema metadata inside the inner loop —
                 // the inference is per-pair because the bookId depends on the
@@ -207,6 +241,7 @@ internal class SefariaLinksImporter(
                 val toRefs = resolveRefs(c2, refsByCanonical, refsByBase)
                 if (fromRefs.isEmpty() || toRefs.isEmpty()) {
                     if (range1 != null || range2 != null) rangedRowsDropped.increment()
+                    rowsDroppedByType.bump(csvConnectionType)
                     continue
                 }
 
@@ -295,6 +330,10 @@ internal class SefariaLinksImporter(
                         val baseProvenance =
                             computeBaseProvenance(storedSrcBook, bookMetaById[storedTgtBook])
 
+                        // In the current pipeline every resolved+typed pair is sent, so
+                        // resolvedPairs==written; kept distinct so a future drop between
+                        // resolution and send stays observable.
+                        resolvedPairsByType.bump(storedType)
                         linkChannel.send(
                             Link(
                                 id = linkId,
@@ -307,6 +346,8 @@ internal class SefariaLinksImporter(
                                 baseProvenance = baseProvenance,
                             )
                         )
+                        linksWrittenByType.bump(storedType)
+                        rowWroteLink = true
 
                         // Ranged sides: record the range end + per-line coverage.
                         // The side is relative to the STORED direction (0 = source).
@@ -354,6 +395,9 @@ internal class SefariaLinksImporter(
                         }
                     }
                 }
+                // Row read but produced no stored link (all pairs unresolved /
+                // missing line / heading / self-link) — count once under raw type.
+                if (!rowWroteLink) rowsDroppedByType.bump(csvConnectionType)
             }
         }
     }
