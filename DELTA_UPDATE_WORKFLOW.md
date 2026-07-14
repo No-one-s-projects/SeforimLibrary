@@ -146,7 +146,7 @@ sequenceDiagram
     Cat-->>Gradle: catalog.pb (~650 KB)
     Gradle->>Lucene: build Lucene segments<br/>(text index over line.content)
     Lucene-->>Gradle: seforim.db.lucene/ + .lookup.lucene/
-    Gradle->>Stamp: INSERT OR REPLACE INTO schema_meta<br/>VALUES ('db_version', '2'),<br/>('db_schema_version', '1')
+    Gradle->>Stamp: INSERT OR REPLACE INTO schema_meta<br/>VALUES ('db_version', '2'),<br/>('db_schema_version', '2')
     Note over Stamp: This row is what lets the<br/>client choose the right delta
     Stamp-->>Gradle: seforim.db (stamped)
     Gradle->>Patch: produce(prev=v1, new=v2)
@@ -477,7 +477,8 @@ Outputs that you upload to the CDN :
   - ✅ Strict invariant `prev + patch == new` verified on real 7+ GB data
   - ✅ Live Zayit GUI applied a 339 MiB patch to a v1 DB in 3m 26s
   - ✅ Post-apply DB matches the directly-built v2 byte-for-byte on
-    all 26 hashed tables (`compareLogicalContent: 0 tables diverge`)
+    all hashed tables — 26 at the time, 34 today
+    (`compareLogicalContent: 0 tables diverge`)
   - ✅ Catalog.pb embedded in patch.blobs and written atomically
   - ✅ Lucene index re-derived in lock-step (with the
     `upsert_book WHERE NOT IN upsert_line` fix for metadata-only changes)

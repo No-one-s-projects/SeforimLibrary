@@ -229,8 +229,7 @@ CREATE INDEX IF NOT EXISTS idx_book_author_book ON book_author(bookId);
 CREATE INDEX IF NOT EXISTS idx_book_author_author ON book_author(authorId);
 
 -- Declared base-text relations (book -> its base book), Sefaria declared only.
--- Pure junction: both columns form the PK, so delta upserts are
--- INSERT ... ON CONFLICT DO NOTHING (never REPLACE) — no cascade on upsert.
+-- Pure junction (PK = both columns): delta upserts are ON CONFLICT DO NOTHING.
 CREATE TABLE IF NOT EXISTS book_base_text (
     bookId INTEGER NOT NULL REFERENCES book(id) ON DELETE CASCADE,
     baseBookId INTEGER NOT NULL REFERENCES book(id) ON DELETE CASCADE,

@@ -178,11 +178,13 @@ jobs:
           sqlite3 build/patch-v1-v2.db "SELECT name, length(content) FROM blobs"
           echo ""
           echo "=== Patch upserts/deletes per table (non-zero only) ==="
-          for t in source author topic pub_place pub_date connection_type category \
-                   category_closure tocText book book_author book_topic book_pub_place \
-                   book_pub_date book_acronym tocEntry line line_toc link book_has_links \
-                   alt_toc_structure alt_toc_entry line_alt_toc default_commentator \
-                   default_targum schema_meta; do
+          for t in source author topic pub_place pub_date connection_type tocText \
+                   generation category category_closure book book_author book_base_text \
+                   book_topic book_pub_place book_pub_date book_acronym book_generation \
+                   tocEntry line line_toc link link_anchor link_range link_coverage \
+                   book_has_links book_version version_line alt_toc_structure \
+                   alt_toc_entry line_alt_toc default_commentator default_targum \
+                   schema_meta; do
             UC=$(sqlite3 build/patch-v1-v2.db "SELECT COUNT(*) FROM upsert_${t}" 2>/dev/null || echo 0)
             DC=$(sqlite3 build/patch-v1-v2.db "SELECT COUNT(*) FROM delete_${t}" 2>/dev/null || echo 0)
             if [ "$UC" != "0" ] || [ "$DC" != "0" ]; then
