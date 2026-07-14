@@ -315,7 +315,20 @@ jobs:
         if: steps.discover.outputs.has_prev == 'true'
         run: |
           set -euo pipefail
+          # קורא db_schema_version מ-DB; טבלה/שורה חסרה → ERROR (release DB חייב מוטבע).
+          # sqlite3 זמין ברנרים ה-self-hosted (בשימוש גם בוורקפלואי delta-real-diff-*).
+          read_schema() {
+            local db="$1" v
+            if ! v=$(sqlite3 "$db" "SELECT value FROM schema_meta WHERE key='db_schema_version'" 2>/dev/null); then
+              echo "::error::schema_meta missing/unreadable in $db (release DB must be stamped)" >&2
+              return 1
+            fi
+            [ -n "$v" ] || { echo "::error::db_schema_version row missing in $db (release DB must be stamped)" >&2; return 1; }
+            printf '%s' "$v"
+          }
           THIS_VER=${{ steps.discover.outputs.db_version }}
+          THIS_SCHEMA=$(read_schema build/seforim.db) || exit 1
+          echo "THIS DB schema version = $THIS_SCHEMA"
           mkdir -p patches prev-dbs
           for OFFSET in $PATCH_OFFSETS; do
             TARGET_VER=$((THIS_VER - OFFSET))
@@ -337,6 +350,15 @@ jobs:
             unzstd -c prev-dbs/seforim.db.zst > prev-dbs/seforim.db
             PREV_DB=prev-dbs/seforim.db
             test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
+
+            # אין patch חוצה-סכמה: אם הסכמה של ה-prev שונה — דלג על ה-anchor הזה בלבד
+            # (פרסום ה-bundle המלא נמשך). schema_meta חסר → ERROR ב-read_schema.
+            PREV_SCHEMA=$(read_schema "$PREV_DB") || exit 1
+            if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
+              echo "schema $PREV_SCHEMA != $THIS_SCHEMA — cross-schema delta unsupported, skip anchor"
+              rm -rf prev-dbs
+              continue
+            fi
 
             ./gradlew :generator-common:producePatchAndVerify \
               -PprevDb=$PWD/$PREV_DB \
