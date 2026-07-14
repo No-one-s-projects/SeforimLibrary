@@ -36,6 +36,14 @@ python3 scripts/qa/run_all.py --db seforim.db \
 בדיקה 5 מדולגת עם שורת SKIP מפורשת; ‏run_all **אינו** מנחש את נתיב ברירת-המחדל
 `<db>.link-import-metrics.json` (ללא fallbacks — הדו"ח נבדק רק כשמורים עליו במפורש).
 
+### `--require-all`: דילוג = כשל (הרצת release)
+
+בברירת המחדל דילוג מותר (נוח להרצות אד-הוק), ולכן run_all **לעולם אינו** מדפיס
+"כל הבדיקות עברו" כשמשהו דולג — הסיכום מנסח במפורש `עברו X, דולגו Y`. בהרצת
+release יש להעביר `--require-all`: אז **כל** דילוג הופך את הריצה לכשל (יציאה!=0)
+עם רשימת הבדיקות שדולגו והארגומנט המפעיל כל אחת. כך בנייה ששכחה `--metrics` לא
+"עוברת" בשקט ותפספס את בדיקה 10.5. הדגל `--sefaria-stage` מוזרם לבדיקה 5 (ר' להלן).
+
 קוד יציאה: `0` = עבר, שונה מ-`0` = כשל, עם הודעה ברורה ל-stderr (fail loudly, ללא fallbacks).
 
 ## ברירת המחדל: expected מחושב מהבנייה, לא מ-baseline קשיח (סעיף 10א)
@@ -56,7 +64,7 @@ python3 scripts/qa/run_all.py --db seforim.db \
 | `check1_dependence_count.py` | 10.1 | `book.dependenceType` מול schemas; ‏baseline 4,941 ופילוח | `--db --sefaria-dir [--expect-snapshot]` |
 | `check2_book_base_text.py` | 10.2 | `book_base_text` (מוצהר) עם רזולוציית alt-titles בסדר-priority; ‏5,426 | `--db --sefaria-dir [--priority-list] [--expect-snapshot]` |
 | `check3_elucidation.py` | 10.3 | 0 קישורי ELUCIDATION ב-DB | `--db` |
-| `check5_import_metrics.py` | 10.5 | דו"ח מדדי ייבוא הקישורים (`<db>.link-import-metrics.json`): אי-שליליות, ‏dropped ≤ rowsRead פר-סוג, ‏Σwritten ≤ ΣresolvedPairs, ואופציונלית DB ≥ written פר-סוג | `--metrics [--db]` |
+| `check5_import_metrics.py` | 10.5 | דו"ח מדדי ייבוא הקישורים (`<db>.link-import-metrics.json`, צורת `insertedByType`/`persistedByType`): אי-שליליות, ‏dropped ≤ rowsRead פר-סוג, ‏Σwritten ≤ ΣresolvedPairs, ‏Σwritten==Σpersisted, ואופציונלית DB ≥ persisted פר-סוג (או == עם `--sefaria-stage`) + הצלבת schema_meta | `--metrics [--db] [--sefaria-stage]` |
 | `check6_metadata_rowbyrow.py` | 10.6 | שורה-שורה לפי heRef: dependenceType, collectiveTitleHe/En | `--db --sefaria-dir` |
 | `check7_provenance.py` | 10.7 | baseProvenance 1/2, זוגות מוסקים, עקביות מכוונת (source,target) מול book_base_text, הרכב דרגות פר ספר-מקור (סדר ה-SOURCE עצמו — בבדיקת ה-dao, ר' להלן) | `--db [--expect-snapshot]` |
 | `check8_integrity.py` | 10.8 | `PRAGMA quick_check` + `PRAGMA foreign_key_check` | `--db` |
@@ -72,21 +80,38 @@ python3 scripts/qa/run_all.py --db seforim.db \
 
 ## בדיקה 5: דו"ח מדדי ייבוא הקישורים
 
-‏`SefariaLinksImporter` (קומיט 6917895) כותב בסוף ייבוא הקישורים דו"ח JSON דטרמיניסטי
-לצד ה-DB הנשמר — `<db>.link-import-metrics.json` — בצורה:
+‏`SefariaLinksImporter` כותב בסוף ייבוא הקישורים דו"ח JSON דטרמיניסטי לצד ה-DB
+הנשמר — `<db>.link-import-metrics.json`. מקומיט **ddb1f24** ואילך הצורה היא:
 
 ```json
-{"perType": {"COMMENTARY": {"rowsRead": 0, "dropped": 0, "resolvedPairs": 0, "written": 0}}}
+{
+  "db_schema_version": "2",
+  "db_version": "15",
+  "db_size_bytes": 7906639872,
+  "insertedByType": {"COMMENTARY": {"rowsRead": 0, "dropped": 0, "resolvedPairs": 0, "written": 0}},
+  "persistedByType": {"RELATED": 0}
+}
 ```
 
-סמנטיקה (`LinkImportTypeMetrics`): ‏`rowsRead` = כל שורת CSV שנפרסה, לפני כל דילוג;
-‏`dropped` = שורות שלא הניבו קישור; ‏`resolvedPairs` = זוגות ששני צידיהם נפתרו ל-line ids
-(לפני סינוני כותרת/קישור-עצמי); ‏`written` = הכנסות **בפועל** (INSERT OR IGNORE, ללא
-כפילויות). שלושת הראשונים ממופתחים לפי הטיפוס הגולמי מה-CSV; ‏`written` לפי הטיפוס
-הסופי שנשמר (אחרי שדרוג blank→schema והיפוך כיוון) — ולכן `written ≤ resolvedPairs`
-נאכף **גלובלית בלבד**, ואילו `dropped ≤ rowsRead` פר-סוג. הצלבת ה-DB (עם `--db`)
-היא `≥` ולא `==`: ה-DB צובר קישורים גם ממקורות אחרים (havrouta/otzaria/linker), ואי
-אפשר לדעת מה-DB לבדו אילו סוגים מגיעים רק מ-CSV של ספריא.
+הצורה הישנה (`perType` בלבד) נדחית בקול עם הודעה שהדו"ח קדם ל-ddb1f24.
+
+**`insertedByType`** — מוני שלב-ההכנסה, **טרם** ה-demotion. ‏`rowsRead` = כל שורת CSV
+שנפרסה; ‏`dropped` = שורות שלא הניבו קישור; ‏`resolvedPairs` = זוגות ששני צידיהם נפתרו
+ל-line ids (לפני סינוני כותרת/קישור-עצמי); ‏`written` = הכנסות **בפועל** (INSERT OR
+IGNORE). שלושת הראשונים ממופתחים לפי הטיפוס הגולמי מה-CSV; ‏`written` לפי הטיפוס שנשמר
+בהכנסה — ולכן `Σwritten ≤ ΣresolvedPairs` נאכף גלובלית, ו-`dropped ≤ rowsRead` פר-סוג.
+
+**`persistedByType`** — ‏`COUNT(*)` סמכותי **אחרי** `demoteCrossCorpusDependantLinks`
+(בבנייה אמיתית ה-demotion מעביר ~56K קישורי COMMENTARY/MIDRASH חוצי-קורפוס ל-RELATED).
+ה-demotion רק ממיין-מחדש, ולכן `Σwritten(insertedByType) == ΣpersistedByType` (מדויק,
+נאכף גם בצד Kotlin). **לכן כל השוואה פר-סוג מול ה-DB משתמשת ב-`persistedByType`,
+לא ב-`written`.**
+
+הצלבת ה-DB (עם `--db`) היא `≥` ולא `==`: ה-DB המלא צובר קישורים גם ממקורות אחרים
+(havrouta/otzaria/linker). כשה-DB הוא **DB בשלב-ספריא בלבד** (טרם הצבירה) יש להעביר
+`--sefaria-stage` וההשוואה הופכת מדויקת (`==`). בנוסף, כש-`db_schema_version`/
+`db_version` בדו"ח אינם `null` ו-`--db` הועבר — הם מוצלבים מול `schema_meta` ב-DB
+(אי-התאמה = כשל); ‏`null` (טרם שלב ה-stamp) מתקבל.
 
 ## סדר ה-SOURCE (בדיקה 7) — מכוסה בבדיקת ה-dao, לא כאן
 

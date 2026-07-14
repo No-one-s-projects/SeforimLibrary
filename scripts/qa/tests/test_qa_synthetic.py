@@ -54,7 +54,8 @@ SRC_SEFARIA, SRC_MOREBOOKS = 1, 2
 
 
 def _make_db(path, books=(), bbt=(), links=(), conn_types=(), lines=(),
-             sources=((SRC_SEFARIA, "Sefaria"), (SRC_MOREBOOKS, "MoreBooks"))):
+             sources=((SRC_SEFARIA, "Sefaria"), (SRC_MOREBOOKS, "MoreBooks")),
+             schema_meta=()):
     # books: 8-tuple — (id, heRef, dep, collHe, collEn, isBaseBook, orderIndex, sourceId).
     conn = sqlite3.connect(path)
     conn.executescript("""
@@ -65,11 +66,13 @@ def _make_db(path, books=(), bbt=(), links=(), conn_types=(), lines=(),
         CREATE TABLE book_base_text(bookId INTEGER, baseBookId INTEGER);
         CREATE TABLE connection_type(id INTEGER PRIMARY KEY, name TEXT);
         CREATE TABLE line(id INTEGER PRIMARY KEY, lineIndex INTEGER);
+        CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE link(id INTEGER PRIMARY KEY AUTOINCREMENT, sourceBookId INTEGER,
             targetBookId INTEGER, sourceLineId INTEGER, targetLineId INTEGER,
             connectionTypeId INTEGER, baseProvenance INTEGER);
     """)
     conn.executemany("INSERT INTO source VALUES(?,?)", sources)
+    conn.executemany("INSERT INTO schema_meta VALUES(?,?)", schema_meta)
     conn.executemany("INSERT INTO book(id,heRef,dependenceType,collectiveTitleHe,"
                      "collectiveTitleEn,isBaseBook,orderIndex,sourceId) "
                      "VALUES(?,?,?,?,?,?,?,?)", books)
@@ -245,66 +248,167 @@ def test_source_filter_regression():
         _check("אין שורת source='Sefaria' → יציאה!=0", rc != 0, out.strip().splitlines()[-1:])
 
 
-# --- check5: אימות דו"ח מדדי הייבוא (pass + fail) -------------------------------
-def _write_metrics(path, per_type):
+# --- check5: אימות דו"ח מדדי הייבוא בצורה החדשה (ddb1f24) -----------------------
+def _write_metrics(path, inserted, persisted=None, schema_version=None, db_version=None):
+    # ברירת מחדל ל-persisted: זהה ל-written פר-סוג (Σ שווה, האינווריאנט מתקיים).
+    if persisted is None:
+        persisted = {name: v["written"] for name, v in inserted.items()}
+    report = {"db_schema_version": schema_version, "db_version": db_version,
+              "db_size_bytes": 12345,
+              "insertedByType": inserted, "persistedByType": persisted}
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"perType": per_type}, fh, ensure_ascii=False)
+        json.dump(report, fh, ensure_ascii=False)
+
+
+def _write_raw(path, obj):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False)
 
 
 def test_check5():
-    print("check5_import_metrics: pass + fail")
+    print("check5_import_metrics: pass + fail (צורת inserted/persisted)")
     with tempfile.TemporaryDirectory() as tmp:
-        def metrics_path(name, per_type):
+        def mp(name, inserted, **kw):
             p = os.path.join(tmp, name)
-            _write_metrics(p, per_type)
+            _write_metrics(p, inserted, **kw)
             return p
 
-        ok = metrics_path("ok.json", {
+        ok = mp("ok.json", {
             "COMMENTARY": {"rowsRead": 10, "dropped": 2, "resolvedPairs": 9, "written": 8},
             "OTHER": {"rowsRead": 5, "dropped": 5, "resolvedPairs": 3, "written": 0}})
         rc, out = _run("check5_import_metrics.py", "--metrics", ok)
         _check("check5 pass (אינווריאנטים מתקיימים)", rc == 0, out.strip().splitlines()[-1:])
 
-        bad_drop = metrics_path("drop.json", {
+        # demotion: written COMMENTARY=8 → persisted RELATED=8; Σ נשמר.
+        demote = mp("demote.json",
+                    {"COMMENTARY": {"rowsRead": 10, "dropped": 2, "resolvedPairs": 9, "written": 8}},
+                    persisted={"RELATED": 8})
+        rc, out = _run("check5_import_metrics.py", "--metrics", demote)
+        _check("check5 pass על demotion (Σwritten==Σpersisted)", rc == 0,
+               out.strip().splitlines()[-1:])
+
+        bad_drop = mp("drop.json", {
             "COMMENTARY": {"rowsRead": 3, "dropped": 4, "resolvedPairs": 0, "written": 0}})
         rc, out = _run("check5_import_metrics.py", "--metrics", bad_drop)
         _check("check5 fail על dropped>rowsRead", rc != 0, out.strip().splitlines()[-1:])
 
-        bad_neg = metrics_path("neg.json", {
+        bad_neg = mp("neg.json", {
             "COMMENTARY": {"rowsRead": 3, "dropped": 0, "resolvedPairs": -1, "written": 0}})
         rc, out = _run("check5_import_metrics.py", "--metrics", bad_neg)
         _check("check5 fail על ערך שלילי", rc != 0, out.strip().splitlines()[-1:])
 
-        # Σwritten > ΣresolvedPairs — גלובלית (פר-סוג הכלל לא תקף בגלל מפתוח שונה).
-        bad_sum = metrics_path("sum.json", {
+        # Σwritten > ΣresolvedPairs — גלובלית (persisted תואם ל-written כדי לבודד את השגיאה).
+        bad_res = mp("res.json", {
             "OTHER": {"rowsRead": 4, "dropped": 0, "resolvedPairs": 1, "written": 0},
             "COMMENTARY": {"rowsRead": 0, "dropped": 0, "resolvedPairs": 0, "written": 2}})
-        rc, out = _run("check5_import_metrics.py", "--metrics", bad_sum)
+        rc, out = _run("check5_import_metrics.py", "--metrics", bad_res)
         _check("check5 fail על Σwritten>ΣresolvedPairs", rc != 0, out.strip().splitlines()[-1:])
 
-        bad_key = metrics_path("key.json", {
-            "COMMENTARY": {"rowsRead": 1, "dropped": 0, "resolvedPairs": 1}})
+        # Σwritten != Σpersisted (חדש) — persisted מזייף סכום.
+        bad_sum = mp("sum.json",
+                     {"COMMENTARY": {"rowsRead": 10, "dropped": 0, "resolvedPairs": 9, "written": 8}},
+                     persisted={"COMMENTARY": 7})
+        rc, out = _run("check5_import_metrics.py", "--metrics", bad_sum)
+        _check("check5 fail על Σwritten!=Σpersisted", rc != 0, out.strip().splitlines()[-1:])
+
+        bad_key = mp("key.json",
+                     {"COMMENTARY": {"rowsRead": 1, "dropped": 0, "resolvedPairs": 1}},
+                     persisted={"COMMENTARY": 1})
         rc, out = _run("check5_import_metrics.py", "--metrics", bad_key)
         _check("check5 fail על מפתח written חסר", rc != 0, out.strip().splitlines()[-1:])
 
-        # הצלבת DB: written=2 מול 3 קישורי COMMENTARY ב-DB → pass; ‏written=4 → fail.
+        # דחיית הצורה הישנה (perType) בקול.
+        old = os.path.join(tmp, "old.json")
+        _write_raw(old, {"perType": {"COMMENTARY": {
+            "rowsRead": 1, "dropped": 0, "resolvedPairs": 1, "written": 1}}})
+        rc, out = _run("check5_import_metrics.py", "--metrics", old)
+        _check("check5 fail על צורת perType מיושנת", rc != 0 and "ddb1f24" in out,
+               out.strip().splitlines()[-1:])
+
+        # persistedByType חסר לגמרי → צורה לא תקינה.
+        no_persist = os.path.join(tmp, "nopersist.json")
+        _write_raw(no_persist, {"db_schema_version": None, "db_version": None,
+                                "db_size_bytes": 1, "insertedByType": {
+                                    "COMMENTARY": {"rowsRead": 1, "dropped": 0,
+                                                   "resolvedPairs": 1, "written": 1}}})
+        rc, out = _run("check5_import_metrics.py", "--metrics", no_persist)
+        _check("check5 fail על היעדר persistedByType", rc != 0, out.strip().splitlines()[-1:])
+
+        # הצלבת DB (≥): 3 קישורי COMMENTARY ב-DB, persisted=2 → pass; persisted=4 → fail.
         db = os.path.join(tmp, "links.db")
         _make_db(db, conn_types=[(1, "COMMENTARY")],
                  links=[(1, 2, 1, 2, 1, 0), (1, 3, 1, 3, 1, 0), (1, 4, 1, 4, 1, 0)])
-        cross_ok = metrics_path("cross_ok.json", {
-            "COMMENTARY": {"rowsRead": 2, "dropped": 0, "resolvedPairs": 2, "written": 2}})
+        cross_ok = mp("cross_ok.json",
+                      {"COMMENTARY": {"rowsRead": 2, "dropped": 0, "resolvedPairs": 2, "written": 2}})
         rc, out = _run("check5_import_metrics.py", "--metrics", cross_ok, "--db", db)
-        _check("check5 pass הצלבת DB (DB=3 ≥ written=2)", rc == 0, out.strip().splitlines()[-1:])
-        cross_bad = metrics_path("cross_bad.json", {
-            "COMMENTARY": {"rowsRead": 4, "dropped": 0, "resolvedPairs": 4, "written": 4}})
+        _check("check5 pass הצלבת DB (DB=3 ≥ persisted=2)", rc == 0, out.strip().splitlines()[-1:])
+        cross_bad = mp("cross_bad.json",
+                       {"COMMENTARY": {"rowsRead": 4, "dropped": 0, "resolvedPairs": 4, "written": 4}})
         rc, out = _run("check5_import_metrics.py", "--metrics", cross_bad, "--db", db)
-        _check("check5 fail הצלבת DB (DB=3 < written=4)", rc != 0, out.strip().splitlines()[-1:])
+        _check("check5 fail הצלבת DB (DB=3 < persisted=4)", rc != 0, out.strip().splitlines()[-1:])
+
+        # --sefaria-stage: DB=3 מול persisted=3 → pass (==); persisted=2 → fail (== נדרש).
+        stage_ok = mp("stage_ok.json",
+                      {"COMMENTARY": {"rowsRead": 3, "dropped": 0, "resolvedPairs": 3, "written": 3}})
+        rc, out = _run("check5_import_metrics.py", "--metrics", stage_ok, "--db", db,
+                       "--sefaria-stage")
+        _check("check5 pass --sefaria-stage (DB=3 == persisted=3)", rc == 0,
+               out.strip().splitlines()[-1:])
+        rc, out = _run("check5_import_metrics.py", "--metrics", cross_ok, "--db", db,
+                       "--sefaria-stage")
+        _check("check5 fail --sefaria-stage (DB=3 != persisted=2)", rc != 0,
+               out.strip().splitlines()[-1:])
+
+        # הצלבת schema_meta: ערכים לא-null מוצלבים מול ה-DB.
+        db_meta = os.path.join(tmp, "meta.db")
+        _make_db(db_meta, conn_types=[(1, "COMMENTARY")],
+                 links=[(1, 2, 1, 2, 1, 0), (1, 3, 1, 3, 1, 0)],
+                 schema_meta=[("db_schema_version", "2"), ("db_version", "15")])
+        meta_ok = mp("meta_ok.json",
+                     {"COMMENTARY": {"rowsRead": 2, "dropped": 0, "resolvedPairs": 2, "written": 2}},
+                     schema_version="2", db_version="15")
+        rc, out = _run("check5_import_metrics.py", "--metrics", meta_ok, "--db", db_meta)
+        _check("check5 pass הצלבת schema_meta תואמת", rc == 0, out.strip().splitlines()[-1:])
+        meta_bad = mp("meta_bad.json",
+                      {"COMMENTARY": {"rowsRead": 2, "dropped": 0, "resolvedPairs": 2, "written": 2}},
+                      schema_version="3", db_version="15")
+        rc, out = _run("check5_import_metrics.py", "--metrics", meta_bad, "--db", db_meta)
+        _check("check5 fail הצלבת schema_meta לא-תואמת", rc != 0, out.strip().splitlines()[-1:])
+
+
+# --- run_all: --require-all הופך דילוג לכשל --------------------------------------
+def test_run_all_require_all():
+    print("run_all: --require-all הופך דילוג לכשל; ברירת המחדל מדלגת")
+    with tempfile.TemporaryDirectory() as tmp:
+        # DB שמספק את בדיקות 3/7/8 (פיקסטורת check7 העוברת + סוג ELUCIDATION עם 0 קישורים).
+        # ללא --sefaria-dir/--metrics → check5 ובדיקות 1/2/6 מדולגות.
+        db = os.path.join(tmp, "d.db")
+        _make_db(db,
+                 books=[(1, "S", None, None, None, 0, 5, SRC_SEFARIA),
+                        (2, "T2", None, None, None, 1, 1, SRC_SEFARIA),
+                        (3, "T1", None, None, None, 0, 2, SRC_SEFARIA),
+                        (4, "T0", None, None, None, 0, 3, SRC_SEFARIA)],
+                 bbt=[(2, 1)],
+                 links=[(1, 2, 1, 2, 1, 2), (1, 3, 1, 3, 1, 1), (1, 4, 1, 4, 1, 0)],
+                 conn_types=[(1, "COMMENTARY"), (2, "ELUCIDATION")],
+                 lines=[(1, 1), (2, 1), (3, 1), (4, 1)])
+        # בלי --metrics ובלי --sefaria-dir: check5 + 1/2/6 מדולגות.
+        rc, out = _run("run_all.py", "--db", db)
+        _check("run_all ברירת מחדל: דילוג מותר (יציאה 0)", rc == 0, out.strip().splitlines()[-3:])
+        _check("run_all ברירת מחדל: מנסח 'דולגו' ולא 'כל הבדיקות עברו'",
+               "דולגו" in out and "כל הבדיקות עברו" not in out, out.strip().splitlines()[-3:])
+        rc, out = _run("run_all.py", "--db", db, "--require-all")
+        _check("run_all --require-all: דילוג → כשל (יציאה!=0)", rc != 0,
+               out.strip().splitlines()[-3:])
+        _check("run_all --require-all: מפרט את הארגומנט המפעיל (--metrics)",
+               "--metrics" in out, out.strip().splitlines()[-4:])
 
 
 def main():
     for t in (test_primary_beats_earlier_alias, test_resolve_order,
               test_check2, test_check6, test_check7,
-              test_source_filter_regression, test_check5):
+              test_source_filter_regression, test_check5,
+              test_run_all_require_all):
         t()
     print()
     if _FAILURES:
