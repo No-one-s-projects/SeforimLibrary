@@ -63,6 +63,11 @@ internal class SefariaLinksImporter(
         val csvFiles = Files.list(linksDir)
             .filter { it.fileName.toString().endsWith(".csv") }
             .toList()
+            .filter { file ->
+                val skip = file.fileName.toString() in SEFARIA_AGGREGATE_LINK_FILES
+                if (skip) logger.i { "Skipping Sefaria aggregate summary file: ${file.fileName}" }
+                !skip
+            }
 
         logger.i { "Processing ${csvFiles.size} link files..." }
 
@@ -640,6 +645,13 @@ internal class SefariaLinksImporter(
         )
     }
 }
+
+// Sefaria's aggregate summary exports (header `Text 1,Text 2,Link Count`), not
+// per-link data — skipped by exact filename per the no-fallbacks policy.
+internal val SEFARIA_AGGREGATE_LINK_FILES = setOf(
+    "links_by_book.csv",
+    "links_by_book_without_commentary.csv",
+)
 
 private val charLevelJson = Json { ignoreUnknownKeys = true }
 
