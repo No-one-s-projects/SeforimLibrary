@@ -556,6 +556,68 @@ class SeforimRepositoryIntegrationTest {
         assertEquals(2, repository.getLink(linkId)?.baseProvenance)
     }
 
+    // Exercises the REAL selectInverseLinksByTargetLineIds mirror query: links are
+    // inserted in provenance order 0,1,2 with every tie-breaker (isBaseBook,
+    // orderIndex) stacked toward that insertion order, so the [2,1,0] output can
+    // only come from `ORDER BY l.baseProvenance DESC` in LinkQueries.sq.
+    @Test
+    fun `SOURCE view orders by baseProvenance DESC ahead of all tie-breakers`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val categoryId = repository.insertCategory(
+            Category(parentId = null, title = "Cat", level = 0, order = 1)
+        )
+        // Base books: provenance-0 book gets the STRONGEST tie-breakers
+        // (isBaseBook=true, lowest orderIndex); provenance-2 the weakest.
+        val noneBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "None", order = 1f, isBaseBook = true)
+        )
+        val inferredBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Inferred", order = 2f, isBaseBook = false)
+        )
+        val declaredBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Declared", order = 3f, isBaseBook = false)
+        )
+        val depBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Dep", order = 4f, isBaseBook = false)
+        )
+        val noneLineId = repository.insertLine(Line(bookId = noneBookId, lineIndex = 0, content = "none"))
+        val inferredLineId = repository.insertLine(Line(bookId = inferredBookId, lineIndex = 0, content = "inferred"))
+        val declaredLineId = repository.insertLine(Line(bookId = declaredBookId, lineIndex = 0, content = "declared"))
+        val depLineId = repository.insertLine(Line(bookId = depBookId, lineIndex = 0, content = "dep"))
+
+        // Deliberately REVERSED provenance insertion order: none(0), inferred(1), declared(2).
+        for ((bookId, lineId, provenance) in listOf(
+            Triple(noneBookId, noneLineId, 0),
+            Triple(inferredBookId, inferredLineId, 1),
+            Triple(declaredBookId, declaredLineId, 2),
+        )) {
+            repository.insertLink(
+                Link(
+                    sourceBookId = bookId,
+                    targetBookId = depBookId,
+                    sourceLineId = lineId,
+                    targetLineId = depLineId,
+                    targetLineIndex = 0,
+                    connectionType = ConnectionType.COMMENTARY,
+                    baseProvenance = provenance,
+                )
+            )
+        }
+
+        // includeSources=true routes through selectInverseLinksByTargetLineIds.
+        val sources = repository.getCommentariesForLines(
+            lineIds = listOf(depLineId),
+            includeSources = true,
+        )
+
+        assertEquals(3, sources.size)
+        assertEquals(
+            listOf(declaredBookId, inferredBookId, noneBookId),
+            sources.map { it.link.targetBookId },
+            "SOURCE view must return provenance sequence [2,1,0] (declared, inferred, none)"
+        )
+    }
+
     // Plan commit 9: selectCommentatorsByBook now spans the full dependent group,
     // so a MIDRASH link (not just COMMENTARY/TARGUM) must surface as a commentator.
     @Test
