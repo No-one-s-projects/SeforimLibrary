@@ -8,11 +8,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, normalize_title_key, open_db,
                     require_columns, resolve_schemas_dir, die,
                     default_priority_list_path, load_priority_list,
-                    order_books_by_priority)
+                    order_books_by_priority, build_normalized_title_to_bookid)
 
-# ‏5,437 אומת row-by-row מול בניית סכמה-2 האמיתית (expected==DB); ‏5,426 של התוכנית
-# היה ארטיפקט מדידה ללא שכפול סדר-priority של היבואן (ראו README).
-SNAPSHOT_ROWS = 5437
+# ‏5,426 הוא ה-baseline הנכון (אחרי תיקון היבואן ב-8358a16). ‏5,437 שנצפה קודם היה תוצר
+# באג ביבואן — alias של ספר מוקדם (מ"מעילה") האפיל על פרימרי של ספר מאוחר, וכפל 11 זוגות.
+SNAPSHOT_ROWS = 5426
 
 
 def main():
@@ -42,20 +42,11 @@ def main():
     books = order_books_by_priority(load_schema_books(schemas_dir),
                                     load_priority_list(args.priority_list))
 
-    # שכפול normalizedTitleToBookId (SefariaDirectImporter.kt:278-286): putIfAbsent פר-ספר
-    # משולב — פרימריז (heTitle/enTitle) של כל ספר ואז ה-aliases שלו, לפני הספר הבא.
-    norm_to_id = {}
-    # רק ספרים שקיימים ב-DB (post-blacklist): heTitle מנורמל מול heRef.
+    # שכפול buildNormalizedTitleToBookId (SefariaDirectImporter.kt): שני מעברים גלובליים —
+    # כל הפרימריז בסדר-priority ואז כל ה-aliases. רק ספרים שקיימים ב-DB (post-blacklist):
+    # heTitle מנורמל מול heRef.
     schema_dbid = [(b, db_id_by_he.get(normalize_title_key(b.he_title))) for b in books]
-    for b, dbid in schema_dbid:
-        if dbid is None:
-            continue
-        for t in (b.he_title, b.en_title):
-            n = normalize_title_key(t)
-            if n is not None:
-                norm_to_id.setdefault(n, dbid)
-        for a in b.alias_keys:
-            norm_to_id.setdefault(a, dbid)
+    norm_to_id = build_normalized_title_to_bookid(schema_dbid)
 
     expected_pairs = set()
     for b, dbid in schema_dbid:

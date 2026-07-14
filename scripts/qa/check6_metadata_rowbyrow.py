@@ -22,6 +22,8 @@ def main():
 
     schemas_dir = resolve_schemas_dir(args.sefaria_dir)
     books = load_schema_books(schemas_dir)
+    if not books:
+        die(f"אף schema-book לא נטען מ-{schemas_dir}")
     # heRef ב-DB == payload.heTitle == schema heTitle (השוואה מדויקת, לא מנורמלת).
     by_he = {}
     collisions = 0
@@ -34,13 +36,14 @@ def main():
 
     mismatches = []
     matched = 0
-    unmatched_with_meta = 0
+    unmatched_with_meta = []
     for r in conn.execute(
             "SELECT heRef, dependenceType, collectiveTitleHe, collectiveTitleEn FROM book"):
         b = by_he.get(r["heRef"]) if r["heRef"] is not None else None
         if b is None:
+            # ספר עם מטא-דאטת Sefaria (dependenceType/collectiveTitle*) חייב schema תואם.
             if (r["dependenceType"] or r["collectiveTitleHe"] or r["collectiveTitleEn"]):
-                unmatched_with_meta += 1
+                unmatched_with_meta.append(r["heRef"])
             continue
         matched += 1
         for field, dbv, schv in (
@@ -51,9 +54,15 @@ def main():
                 mismatches.append((r["heRef"], field, dbv, schv))
 
     print(f"books שהותאמו ל-schema: {matched}")
-    print(f"books עם מטא-דאטה ללא schema תואם (לא-Sefaria/מידע בלבד): {unmatched_with_meta}")
+    print(f"books עם מטא-דאטה ללא schema תואם: {len(unmatched_with_meta)}")
     print(f"אי-התאמות שדה: {len(mismatches)}")
 
+    if matched == 0:
+        die("אף ספר ב-DB לא הותאם ל-schema (heRef לא תואם אף heTitle) — בדיקה ריקה, כשל")
+    if unmatched_with_meta:
+        for heref in unmatched_with_meta[:args.max_report]:
+            print(f"  מטא-דאטה ללא schema: {heref!r}", file=sys.stderr)
+        die(f"{len(unmatched_with_meta)} ספרים עם מטא-דאטת Sefaria וללא schema תואם")
     if mismatches:
         for heref, field, dbv, schv in mismatches[:args.max_report]:
             print(f"  {heref!r} :: {field}: DB={dbv!r} schema={schv!r}", file=sys.stderr)

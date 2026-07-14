@@ -15,7 +15,11 @@ generator/sefariasqlite/build/sefaria/export/schemas/*.json
 ```
 
 אפשר להעביר את `.../sefaria`, את `.../export` או את `.../schemas` ישירות — הסקריפט
-מנסה את שלוש הפריסות ונכשל בקול עם רשימת הנתיבים שנוסו. קובץ schema לא-קריא
+מנסה את המועמדים בסדר קבוע: `<dir>/schemas`, `<dir>/export/schemas`, ורק לבסוף
+`<dir>` עצמו. כל מועמד עם קובצי `*.json` מאומת שהוא **באמת** תיקיית schemas (לפחות
+קובץ אחד נטען ל-dict עם אובייקט `schema` מקונן); אם למועמד יש `*.json` אך אף לא
+schema אחד (למשל `export/` המכיל רק `table_of_contents.json`) — ממשיכים למועמד הבא;
+אם אף מועמד לא מספק schema — כשל בקול עם רשימת הנתיבים שנוסו. קובץ schema לא-קריא
 (למשל `Sheet.json` בגודל 0 בייצוא האמיתי) מדולג עם אזהרה — שכפול דטרמיניסטי של
 `runCatching` פר-קובץ ב-`SefariaBookPayloadReader.kt:33-49`, לא היוריסטיקה.
 
@@ -34,8 +38,7 @@ python3 scripts/qa/run_all.py --db seforim.db \
 
 ה-exporter משכפל את Sefaria-Project HEAD ללא הצמדה
 (`05_clone_sefaria_project.sh` — `git clone --depth 1`), ולכן המספרים
-`4,941 / 5,437 / 13,056 / 20` נכונים ל-snapshot הנוכחי בלבד. (ערך התוכנית ‏5,426
-ל-book_base_text היה ארטיפקט מדידה — ראו סעיף הרזולוציה למטה.) לכן:
+`4,941 / 5,426 / 13,056 / 20` נכונים ל-snapshot הנוכחי בלבד. לכן:
 
 - **ברירת מחדל:** כל בדיקה מחשבת את ה-`expected` מארטיפקטי אותה בנייה (schemas)
   ומשווה שורה-שורה מול ה-DB. זו ההשוואה המחייבת.
@@ -47,10 +50,10 @@ python3 scripts/qa/run_all.py --db seforim.db \
 | סקריפט | בדיקה | מה נבדק | ארגומנטים |
 |---|---|---|---|
 | `check1_dependence_count.py` | 10.1 | `book.dependenceType` מול schemas; ‏baseline 4,941 ופילוח | `--db --sefaria-dir [--expect-snapshot]` |
-| `check2_book_base_text.py` | 10.2 | `book_base_text` (מוצהר) עם רזולוציית alt-titles בסדר-priority; ‏5,437 | `--db --sefaria-dir [--priority-list] [--expect-snapshot]` |
+| `check2_book_base_text.py` | 10.2 | `book_base_text` (מוצהר) עם רזולוציית alt-titles בסדר-priority; ‏5,426 | `--db --sefaria-dir [--priority-list] [--expect-snapshot]` |
 | `check3_elucidation.py` | 10.3 | 0 קישורי ELUCIDATION ב-DB | `--db` |
 | `check6_metadata_rowbyrow.py` | 10.6 | שורה-שורה לפי heRef: dependenceType, collectiveTitleHe/En | `--db --sefaria-dir` |
-| `check7_provenance.py` | 10.7 | baseProvenance 1/2, זוגות מוסקים, עקביות מול book_base_text, סדר SOURCE | `--db [--expect-snapshot]` |
+| `check7_provenance.py` | 10.7 | baseProvenance 1/2, זוגות מוסקים, עקביות מכוונת (source,target) מול book_base_text, סדר SOURCE לפי ה-mirror ORDER BY | `--db [--expect-snapshot]` |
 | `check8_integrity.py` | 10.8 | `PRAGMA quick_check` + `PRAGMA foreign_key_check` | `--db` |
 
 ## התאמת schemas ↔ DB לפי heRef (לא title)
@@ -78,21 +81,24 @@ python3 scripts/qa/run_all.py --db seforim.db \
    ברירת המחדל של `--priority-list`), אחריו השאר. הנחת סדר שיורית: סדר "השאר"
    אצל היבואן הוא סדר סריקת קבצי הטקסט — כאן סדר שמות קובצי schemas; משפיע רק
    על התנגשויות מפתח בין ספרים לא-priority. בונים מפה `normalized→bookId`
-   **פר-ספר משולב**, כמו `SefariaDirectImporter.kt:278-286`: לכל ספר בתורו —
-   הפרימריז שלו (heTitle/enTitle) ואז ה-aliases שלו, הכול `putIfAbsent`.
+   בשני **מעברים גלובליים**, כמו `buildNormalizedTitleToBookId` המתוקן
+   (`SefariaDirectImporter.kt`): מעבר 1 — הפרימריז (heTitle→enTitle) של **כל**
+   הספרים בסדר-priority; מעבר 2 — ה-aliases של **כל** הספרים; הכול `putIfAbsent`.
+   פיצול המעברים מבטיח שפרימרי מנצח alias — גם alias של ספר מוקדם יותר.
 4. כל מפתח בסיס מוצהר נפתר דרך המפה (כולל aliases) → זוג `(bookId, baseBookId)`.
    קבוצת הזוגות מושווית שורה-שורה מול `book_base_text`.
 
-### מדוע 5,437 ולא 5,426 (ממצא ההרצה האמיתית על סכמה 2)
+### פוסטמורטם: ‏5,437 היה באג יבואן; ‏5,426 הוא ה-baseline הנכון
 
-הרצה מול הבנייה האמיתית נתנה ‏DB=5,437 מול צפי-סקריפט ישן 5,426: ‏11 זוגות
-"עודפים", כולם ‏11 מפרשי תלמוד מעילה (רש"י/תוספות/רבינו גרשום/...) עם
-`base_text_titles={"en":"Meilah","he":"מעילה"}` — שני מפתחות מנורמלים שנפתרים
-אצל היבואן ל**שני ספרים שונים**: ‏"meilah" → משנה מעילה (id 87, דרך alias,
-כי המשנה נטענת לפני התלמוד ב-priority.txt) ו-"מעילה" → מעילה (id 137, primary).
-כלומר שני זוגות לספר — התנהגות יבואן דטרמיניסטית. אחרי שכפול סדר-ה-priority
-בסקריפט: ‏expected==DB==5,437 שורה-שורה. ‏5,426 של התוכנית היה ארטיפקט של שיטת
-מדידה ללא הסדר הזה (התוכנית עצמה לא עודכנה — נכון ל-snapshot זה הערך הוא 5,437).
+הרצה מוקדמת נתנה ‏DB=5,437: ‏11 זוגות "עודפים", כולם מפרשי מעילה עם
+`base_text_titles={"en":"Meilah","he":"מעילה"}`. מפתח `"meilah"` נפתר בטעות ל**משנה
+מעילה** (id 87) — כי ה-alias `"meilah"` של משנה מעילה, שנטענה מוקדם, האפיל על
+ה**פרימרי** `"Meilah"` של תלמוד מעילה שנטען מאוחר. זהו **באג ביבואן**: המפה נבנתה
+פר-ספר משולב (פרימריז+aliases של כל ספר יחד), כך ש-alias של ספר מוקדם ניצח פרימרי
+של ספר מאוחר, וכפל 11 זוגות. תוקן ב-8358a16 (בניית המפה בשני מעברים גלובליים —
+כל הפרימריז ואז כל ה-aliases; ראו למעלה). ה-baseline הנכון הוא **5,426**, וזהו הערך
+שהסקריפט מצפה לו. הרצת הסקריפט המתוקן מול DB **שקדם** לתיקון תיכשל בקול עם בדיוק
+11 זוגות `(X, 87)` כ"עודפים ב-DB" — כלומר הסקריפט מזהה כעת את הבאג.
 
 ## בדיקות שאינן סקריפטים כאן (בכוונה)
 
@@ -109,6 +115,9 @@ python3 scripts/qa/run_all.py --db seforim.db \
 ## אימות
 
 הסקריפטים אומתו מול DB סינתטי (טבלאות/schemas מינימליים) בתרחיש עובר ובתרחיש
-נכשל לכל בדיקה — כולם מדווחים כשל בקול ויוצאים בקוד שונה מ-0. בנוסף רצו מול
-בנייה אמיתית של סכמה 2 (`build/seforim.db`): כל 6 הבדיקות עוברות; ‏4,941 / 5,437 /
-13,056+20 / ‏ELUCIDATION=0 אומתו. ה-E2E המלא (patch 2→2 דרך ה-updater) — קומיט 13.
+נכשל לכל בדיקה — כולם מדווחים כשל בקול ויוצאים בקוד שונה מ-0 (ראו
+`tests/test_qa_synthetic.py`, כולל רגרסיה: פרימרי של ספר מאוחר מנצח alias של ספר
+מוקדם). ‏baseline סכמה 2 נכון: ‏4,941 / **5,426** / 13,056+20 / ‏ELUCIDATION=0.
+הערה: ה-`build/seforim.db` שעל הדיסק **קדם** לתיקון היבואן (8358a16) ולכן check2
+נכשל עליו בקול עם בדיוק 11 זוגות מעילה כ"עודפים" — זו ההוכחה שהסקריפט מזהה את הבאג.
+ה-E2E המלא (patch 2→2 דרך ה-updater) — קומיט 13.

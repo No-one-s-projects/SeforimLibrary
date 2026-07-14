@@ -99,17 +99,61 @@ def order_books_by_priority(books, priority_entries):
     return ordered
 
 
+def _dir_has_schema_books(d):
+    # מאתר לפחות schema אחד תקין (dict עם "schema" מקונן); עצירה מוקדמת.
+    for fn in os.listdir(d):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as fh:
+                top = json.load(fh)
+        except (ValueError, OSError):
+            continue
+        if isinstance(top, dict) and isinstance(top.get("schema"), dict):
+            return True
+    return False
+
+
 def resolve_schemas_dir(sefaria_dir):
     # מקבל schemas/ ישירות, export/ (מכיל schemas/), או sefaria/ (מכיל export/schemas/).
+    # סדר קבוע: schemas תחילה, אחר-כך export/schemas, ורק לבסוף התיקייה עצמה — כדי
+    # ש-export/ (המכיל table_of_contents.json בלבד) לא ייבחר בטעות במקום export/schemas.
     if not os.path.isdir(sefaria_dir):
         die(f"--sefaria-dir אינו תיקייה: {sefaria_dir}")
-    candidates = [sefaria_dir,
-                  os.path.join(sefaria_dir, "schemas"),
-                  os.path.join(sefaria_dir, "export", "schemas")]
+    candidates = [os.path.join(sefaria_dir, "schemas"),
+                  os.path.join(sefaria_dir, "export", "schemas"),
+                  sefaria_dir]
+    attempted = []
     for cand in candidates:
-        if os.path.isdir(cand) and any(f.endswith(".json") for f in os.listdir(cand)):
+        if not (os.path.isdir(cand) and any(f.endswith(".json") for f in os.listdir(cand))):
+            continue
+        attempted.append(cand)
+        # מועמד עם *.json אך ללא ולו schema אחד (למשל export/ עם toc בלבד) — נמשיך הלאה.
+        if _dir_has_schema_books(cand):
             return cand
-    die("לא נמצאו קובצי schema (*.json); נוסו: " + ", ".join(candidates))
+    die("לא נמצאה תיקיית schemas עם קובצי schema תקינים; נוסו: "
+        + ", ".join(attempted or candidates))
+
+
+def build_normalized_title_to_bookid(schema_dbid):
+    # שכפול buildNormalizedTitleToBookId (SefariaDirectImporter.kt): שני מעברים גלובליים
+    # על הספרים בסדר-priority — כל הפרימריז (heTitle→enTitle, putIfAbsent) ואז כל
+    # ה-aliases (putIfAbsent). הפיצול מבטיח שפרימרי מנצח alias, גם alias של ספר מוקדם.
+    # קלט: רשימת (SchemaBook, dbid) בסדר-priority; ערך dbid בערך None מדולג.
+    norm_to_id = {}
+    for b, dbid in schema_dbid:  # מעבר 1: פרימריז של כל הספרים
+        if dbid is None:
+            continue
+        for t in (b.he_title, b.en_title):
+            n = normalize_title_key(t)
+            if n is not None:
+                norm_to_id.setdefault(n, dbid)
+    for b, dbid in schema_dbid:  # מעבר 2: aliases של כל הספרים
+        if dbid is None:
+            continue
+        for a in b.alias_keys:
+            norm_to_id.setdefault(a, dbid)
+    return norm_to_id
 
 
 class SchemaBook:
