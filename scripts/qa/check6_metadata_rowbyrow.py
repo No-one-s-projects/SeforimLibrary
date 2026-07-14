@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""בדיקה 6 (סעיף 10): השוואה שורה-שורה לפי heRef — dependenceType, collectiveTitleHe/En מול schemas."""
+import argparse
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (load_schema_books, open_db, require_columns,
+                    resolve_schemas_dir, die)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="בדיקה 6: מטא-דאטה שורה-שורה")
+    ap.add_argument("--db", required=True)
+    ap.add_argument("--sefaria-dir", required=True)
+    ap.add_argument("--max-report", type=int, default=20)
+    args = ap.parse_args()
+
+    conn = open_db(args.db)
+    require_columns(conn, "book",
+                    ["heRef", "dependenceType", "collectiveTitleHe", "collectiveTitleEn"])
+
+    schemas_dir = resolve_schemas_dir(args.sefaria_dir)
+    books = load_schema_books(schemas_dir)
+    # heRef ב-DB == payload.heTitle == schema heTitle (השוואה מדויקת, לא מנורמלת).
+    by_he = {}
+    collisions = 0
+    for b in books:
+        if b.he_title in by_he:
+            collisions += 1
+        by_he[b.he_title] = b
+    if collisions:
+        print(f"אזהרה: {collisions} כותרות heTitle כפולות ב-schemas (נלקח האחרון)")
+
+    mismatches = []
+    matched = 0
+    unmatched_with_meta = 0
+    for r in conn.execute(
+            "SELECT heRef, dependenceType, collectiveTitleHe, collectiveTitleEn FROM book"):
+        b = by_he.get(r["heRef"]) if r["heRef"] is not None else None
+        if b is None:
+            if (r["dependenceType"] or r["collectiveTitleHe"] or r["collectiveTitleEn"]):
+                unmatched_with_meta += 1
+            continue
+        matched += 1
+        for field, dbv, schv in (
+                ("dependenceType", r["dependenceType"], b.raw_dependence),
+                ("collectiveTitleHe", r["collectiveTitleHe"], b.collective_he),
+                ("collectiveTitleEn", r["collectiveTitleEn"], b.collective_en)):
+            if dbv != schv:
+                mismatches.append((r["heRef"], field, dbv, schv))
+
+    print(f"books שהותאמו ל-schema: {matched}")
+    print(f"books עם מטא-דאטה ללא schema תואם (לא-Sefaria/מידע בלבד): {unmatched_with_meta}")
+    print(f"אי-התאמות שדה: {len(mismatches)}")
+
+    if mismatches:
+        for heref, field, dbv, schv in mismatches[:args.max_report]:
+            print(f"  {heref!r} :: {field}: DB={dbv!r} schema={schv!r}", file=sys.stderr)
+        die(f"{len(mismatches)} אי-התאמות מטא-דאטה שורה-שורה")
+
+    print(f"PASS: מטא-דאטה תואם schemas ({matched} ספרים)")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
