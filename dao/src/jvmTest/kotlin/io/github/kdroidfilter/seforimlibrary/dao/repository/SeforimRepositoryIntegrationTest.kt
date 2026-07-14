@@ -556,6 +556,38 @@ class SeforimRepositoryIntegrationTest {
         assertEquals(2, repository.getLink(linkId)?.baseProvenance)
     }
 
+    // Plan commit 9: selectCommentatorsByBook now spans the full dependent group,
+    // so a MIDRASH link (not just COMMENTARY/TARGUM) must surface as a commentator.
+    @Test
+    fun `getAvailableCommentators includes MIDRASH-typed links`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f)
+        )
+        val midrashBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Bereshit Rabbah", order = 2f)
+        )
+        val baseLineId = repository.insertLine(Line(bookId = baseBookId, lineIndex = 0, content = "Genesis 1:1"))
+        val midrashLineId = repository.insertLine(Line(bookId = midrashBookId, lineIndex = 0, content = "Midrash on 1:1"))
+
+        repository.insertLink(
+            Link(
+                sourceBookId = baseBookId,
+                targetBookId = midrashBookId,
+                sourceLineId = baseLineId,
+                targetLineId = midrashLineId,
+                targetLineIndex = 0,
+                connectionType = ConnectionType.MIDRASH,
+            )
+        )
+
+        val commentators = repository.getAvailableCommentators(baseBookId)
+        assertEquals(1, commentators.size)
+        assertEquals(midrashBookId, commentators.first().bookId)
+        assertEquals("Bereshit Rabbah", commentators.first().title)
+    }
+
     // ==================== Virtual SOURCE view tests ====================
 
     // Validates the single-direction storage + virtual SOURCE view contract:
