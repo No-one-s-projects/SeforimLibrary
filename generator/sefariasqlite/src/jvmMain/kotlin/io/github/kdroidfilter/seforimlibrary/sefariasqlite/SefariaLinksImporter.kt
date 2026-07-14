@@ -188,7 +188,7 @@ internal class SefariaLinksImporter(
 
                 // Hoisted: `conn` is constant across the inner pair loop, no
                 // reason to re-parse it for every (from, to) combination.
-                val csvConnectionType = ConnectionType.fromString(conn)
+                val csvConnectionType = mapCsvConnectionType(conn, file.fileName.toString())
                 // `Conection Type` is blank for ~36% of CSV rows. We try to
                 // recover those via schema metadata inside the inner loop —
                 // the inference is per-pair because the bookId depends on the
@@ -698,6 +698,15 @@ private fun Dependence.toConnectionType(): ConnectionType = when (this) {
     // purposes of the SOURCE view (they're all oriented dependants).
     Dependence.OTHER_DEPENDANT -> ConnectionType.COMMENTARY
 }
+
+/**
+ * Strict mapping of a raw CSV `Conection Type` cell to a [ConnectionType].
+ * Empty/`none`/`other` map to OTHER; any other unrecognized value is a hard
+ * build failure (no silent OTHER fallback — a new Sefaria type must surface).
+ */
+internal fun mapCsvConnectionType(raw: String, source: String): ConnectionType =
+    ConnectionType.fromKnownStringOrNull(raw)
+        ?: error("Unmapped Sefaria connection type '$raw' in $source")
 
 /**
  * When the CSV's `Conection Type` is empty, decide the link's type from

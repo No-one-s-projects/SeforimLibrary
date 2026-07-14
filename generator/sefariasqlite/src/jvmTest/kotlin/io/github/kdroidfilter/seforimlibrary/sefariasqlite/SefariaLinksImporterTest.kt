@@ -4,8 +4,33 @@ import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 class SefariaLinksImporterTest {
+    // ───── mapCsvConnectionType (strict guard, no OTHER fallback) ─────
+
+    @Test
+    fun unmappedConnectionTypeFailsBuildWithRawValueAndSource() {
+        val ex = assertFailsWith<IllegalStateException> {
+            mapCsvConnectionType("brand_new_type", "links_Genesis.csv")
+        }
+        assertTrue("brand_new_type" in ex.message!!)
+        assertTrue("links_Genesis.csv" in ex.message!!)
+    }
+
+    @Test
+    fun emptyNoneOtherConnectionTypesMapToOther() {
+        assertEquals(ConnectionType.OTHER, mapCsvConnectionType("", "f.csv"))
+        assertEquals(ConnectionType.OTHER, mapCsvConnectionType("none", "f.csv"))
+        assertEquals(ConnectionType.OTHER, mapCsvConnectionType("other", "f.csv"))
+    }
+
+    @Test
+    fun knownConnectionTypeMapsThrough() {
+        assertEquals(ConnectionType.COMMENTARY, mapCsvConnectionType("Commentary", "f.csv"))
+    }
+
     // Sefaria's schema base_text_titles is the source of truth: when the
     // target's metadata explicitly says "I depend on the source book", we
     // must trust it regardless of weaker signals like isBaseBook or rank.
