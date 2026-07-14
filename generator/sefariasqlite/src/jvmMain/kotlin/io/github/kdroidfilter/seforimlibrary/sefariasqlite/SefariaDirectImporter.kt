@@ -193,6 +193,10 @@ class SefariaDirectImporter(
         val allRefsWithPath = mutableListOf<RefEntry>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
+        // Collected in priority order during the book loop; the title→bookId
+        // index is built from it in two global phases AFTER the loop so a
+        // primary title always beats any alias (see buildNormalizedTitleToBookId).
+        val titleIndexEntries = mutableListOf<BookTitleIndexEntry>()
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
         // Deferred base-text-key → bookId resolution. We can't resolve at
         // book-insert time because a commentary's base text may not have been
@@ -270,20 +274,15 @@ class SefariaDirectImporter(
             )
             repository.insertBook(book)
 
-            // Track normalized titles (Hebrew/English) for later default-commentator mapping.
-            // Indexes the primary titles plus all Sefaria-known aliases (titleVariants /
-            // heTitleVariants) so title-pattern base parsing ("X on Avot" → Pirkei Avot)
-            // can resolve abbreviated names. `putIfAbsent` keeps priority-ordered primaries
-            // canonical when an alias also matches another book.
-            listOf(payload.heTitle, payload.enTitle).forEach { title ->
-                val normalized = normalizeTitleKey(title)
-                if (normalized != null) {
-                    normalizedTitleToBookId.putIfAbsent(normalized, bookId)
-                }
-            }
-            payload.titleAliasKeys.forEach { alias ->
-                normalizedTitleToBookId.putIfAbsent(alias, bookId)
-            }
+            // Track normalized titles (Hebrew/English) + Sefaria-known aliases
+            // (titleVariants / heTitleVariants) for later default-commentator mapping
+            // and title-pattern base parsing ("X on Avot" → Pirkei Avot). The actual
+            // index is built after the loop so a primary title always beats any alias.
+            titleIndexEntries += BookTitleIndexEntry(
+                bookId = bookId,
+                primaryTitles = listOf(payload.heTitle, payload.enTitle),
+                aliasKeys = payload.titleAliasKeys,
+            )
 
             val catLevel = categoryLevelsById[catId] ?: payload.categoriesHe.lastIndex.coerceAtLeast(0)
             val priorityRank = priorityIndexByPath[normalizedPath]
@@ -402,6 +401,12 @@ class SefariaDirectImporter(
         }
 
         logger.i { "Inserted all books and lines" }
+
+        // Build the title→bookId index in two global phases (all primaries, then
+        // all aliases) so a primary title always beats any alias regardless of
+        // priority-order interleaving. Consumed by default mappings, base-text
+        // resolution, and link-density chaining below.
+        normalizedTitleToBookId.putAll(buildNormalizedTitleToBookId(titleIndexEntries))
 
         // Versions pass — after all lines exist so ref→lineId joins always land.
         logger.i { "Importing book versions..." }
@@ -607,6 +612,42 @@ private fun dumpLinkerSidecar(
                 .append(lineId.toString()).append('\n')
         }
     }
+}
+
+/**
+ * One book's contribution to the title→bookId index, in priority order.
+ * [primaryTitles] are raw titles (heTitle/enTitle, normalized on build);
+ * [aliasKeys] are already-normalized alias variants (titleVariants/heTitleVariants).
+ */
+internal data class BookTitleIndexEntry(
+    val bookId: Long,
+    val primaryTitles: List<String?>,
+    val aliasKeys: List<String>,
+)
+
+/**
+ * Builds the normalized-title → bookId index in TWO GLOBAL PHASES over the
+ * priority-ordered [entries]: first every book's PRIMARY titles, then every
+ * book's alias variants. `putIfAbsent` within each phase keeps the earliest
+ * (highest-priority) claimant; the phase split guarantees a primary title
+ * always wins over any alias, even one from an earlier book. This fixes the
+ * Meilah bug where Mishnah Meilah's alias "meilah" shadowed Talmud Meilah's
+ * primary title, inflating book_base_text rows.
+ */
+internal fun buildNormalizedTitleToBookId(entries: List<BookTitleIndexEntry>): Map<String, Long> {
+    val map = LinkedHashMap<String, Long>()
+    for (entry in entries) {
+        for (title in entry.primaryTitles) {
+            val normalized = normalizeTitleKey(title) ?: continue
+            map.putIfAbsent(normalized, entry.bookId)
+        }
+    }
+    for (entry in entries) {
+        for (alias in entry.aliasKeys) {
+            map.putIfAbsent(alias, entry.bookId)
+        }
+    }
+    return map
 }
 
 /**
