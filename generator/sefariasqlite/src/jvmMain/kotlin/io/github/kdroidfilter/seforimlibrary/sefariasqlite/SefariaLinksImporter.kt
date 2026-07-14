@@ -147,7 +147,10 @@ internal class SefariaLinksImporter(
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
-            if (!iter.hasNext()) return
+            val fileName = file.fileName.toString()
+            if (!iter.hasNext()) {
+                error("Empty link file '$fileName' — missing required header row (Citation 1, Citation 2, Conection Type)")
+            }
             val headers = parseCsvLine(iter.next()).map { normalizeCitation(it) }
             val idxC1 = headers.indexOf("Citation 1")
             val idxC2 = headers.indexOf("Citation 2")
@@ -156,7 +159,14 @@ internal class SefariaLinksImporter(
             // older exports).
             val idxCld1 = headers.indexOf("Char Level Data 1")
             val idxCld2 = headers.indexOf("Char Level Data 2")
-            if (idxC1 < 0 || idxC2 < 0 || idxConn < 0) return
+            if (idxC1 < 0 || idxC2 < 0 || idxConn < 0) {
+                val missing = buildList {
+                    if (idxC1 < 0) add("Citation 1")
+                    if (idxC2 < 0) add("Citation 2")
+                    if (idxConn < 0) add("Conection Type")
+                }.joinToString(", ")
+                error("Link file '$fileName' is missing required header(s): $missing")
+            }
 
             while (iter.hasNext()) {
                 val row = parseCsvLine(iter.next())
@@ -165,6 +175,15 @@ internal class SefariaLinksImporter(
                 val c2 = normalizeCitation(row.getOrNull(idxC2).orEmpty())
                 if (c1.isEmpty() || c2.isEmpty()) continue
                 val conn = row.getOrNull(idxConn)?.trim().orEmpty()
+                // Validate the type BEFORE the resolveRefs skip: an unmapped type
+                // must fail the build even on rows whose citations don't resolve.
+                val csvConnectionType = mapCsvConnectionType(conn, fileName)
+                // `Conection Type` is blank for ~36% of CSV rows. We try to
+                // recover those via schema metadata inside the inner loop —
+                // the inference is per-pair because the bookId depends on the
+                // resolved line.
+                val connIsBlank = conn.isBlank() ||
+                    conn.equals("none", ignoreCase = true)
                 val cld1 = if (charLevelPending != null && idxCld1 >= 0) {
                     parseCharLevelCell(row.getOrNull(idxCld1))
                 } else null
@@ -185,16 +204,6 @@ internal class SefariaLinksImporter(
                     if (range1 != null || range2 != null) rangedRowsDropped.increment()
                     continue
                 }
-
-                // Hoisted: `conn` is constant across the inner pair loop, no
-                // reason to re-parse it for every (from, to) combination.
-                val csvConnectionType = mapCsvConnectionType(conn, file.fileName.toString())
-                // `Conection Type` is blank for ~36% of CSV rows. We try to
-                // recover those via schema metadata inside the inner loop —
-                // the inference is per-pair because the bookId depends on the
-                // resolved line.
-                val connIsBlank = conn.isBlank() ||
-                    conn.equals("none", ignoreCase = true)
 
                 for (from in fromRefs) {
                     for (to in toRefs) {
@@ -278,20 +287,8 @@ internal class SefariaLinksImporter(
                         val typeId = bindings.upsertConnectionType(storedType.name)
                         val linkId = bindings.allocator.linkId(storedSrcLine, storedTgtLine, typeId)
 
-                        // Provenance of the base→dependant orientation: 2 when the
-                        // target's schema **explicitly declares** the source as a
-                        // base text (`base_text_titles`), 1 when it was recovered
-                        // from the "X on Y" title pattern, 0 otherwise (density
-                        // chaining, primary-base inference, priorityRank fallback,
-                        // unoriented). Declared wins over inferred. Boosts declared
-                        // bases above lateral citations in the SOURCE view.
-                        val storedTgtMeta = bookMetaById[storedTgtBook]
-                        val baseProvenance = when {
-                            storedTgtMeta == null -> 0
-                            storedSrcBook in storedTgtMeta.sefariaDeclaredBaseTextBookIds -> 2
-                            storedSrcBook in storedTgtMeta.inferredBaseTextBookIds -> 1
-                            else -> 0
-                        }
+                        val baseProvenance =
+                            computeBaseProvenance(storedSrcBook, bookMetaById[storedTgtBook])
 
                         linkChannel.send(
                             Link(
@@ -704,9 +701,31 @@ private fun Dependence.toConnectionType(): ConnectionType = when (this) {
  * Empty/`none`/`other` map to OTHER; any other unrecognized value is a hard
  * build failure (no silent OTHER fallback — a new Sefaria type must surface).
  */
-internal fun mapCsvConnectionType(raw: String, source: String): ConnectionType =
-    ConnectionType.fromKnownStringOrNull(raw)
+/**
+ * Provenance of the base→dependant orientation, keyed on the STORED target's
+ * schema: 2 when the target **explicitly declares** the source as a base text
+ * (`base_text_titles`), 1 when it was recovered from the "X on Y" title pattern,
+ * 0 otherwise (density chaining, primary-base inference, priorityRank fallback,
+ * unoriented, or no target metadata). Declared wins over inferred. Boosts
+ * declared bases above lateral citations in the SOURCE view.
+ */
+internal fun computeBaseProvenance(storedSrcBook: Long, storedTgtMeta: BookMeta?): Int = when {
+    storedTgtMeta == null -> 0
+    storedSrcBook in storedTgtMeta.sefariaDeclaredBaseTextBookIds -> 2
+    storedSrcBook in storedTgtMeta.inferredBaseTextBookIds -> 1
+    else -> 0
+}
+
+internal fun mapCsvConnectionType(raw: String, source: String): ConnectionType {
+    val type = ConnectionType.fromKnownStringOrNull(raw)
         ?: error("Unmapped Sefaria connection type '$raw' in $source")
+    // SOURCE is a virtual/derived type synthesized at read time — it must never
+    // be persisted from CSV input.
+    if (type == ConnectionType.SOURCE) {
+        error("Connection type '$raw' in $source resolves to SOURCE, which is a virtual type and cannot appear in CSV")
+    }
+    return type
+}
 
 /**
  * When the CSV's `Conection Type` is empty, decide the link's type from

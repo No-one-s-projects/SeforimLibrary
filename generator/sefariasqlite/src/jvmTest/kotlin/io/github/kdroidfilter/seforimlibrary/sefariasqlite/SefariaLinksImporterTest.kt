@@ -393,6 +393,98 @@ class SefariaLinksImporterTest {
         assertNull(result)
     }
 
+    // ───── mapCsvConnectionType: SOURCE rejection ─────
+
+    // SOURCE is a virtual/derived type synthesized at read time — a CSV row
+    // resolving to it (raw "source", "Source", "SOURCE") must fail the build.
+    @Test
+    fun sourceConnectionTypeFromCsvFailsBuild() {
+        val ex = assertFailsWith<IllegalStateException> {
+            mapCsvConnectionType("source", "links_Genesis.csv")
+        }
+        assertTrue("source" in ex.message!!)
+        assertTrue("links_Genesis.csv" in ex.message!!)
+        assertTrue("SOURCE" in ex.message!! || "virtual" in ex.message!!)
+    }
+
+    // ───── computeBaseProvenance (declared / inferred / neither) ─────
+
+    // A link whose stored source is in the target's DECLARED base set
+    // (`base_text_titles`) → baseProvenance 2.
+    @Test
+    fun declaredBaseTextYieldsProvenanceTwo() {
+        val tgtMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            baseTextBookIds = setOf(10L),
+            sefariaDeclaredBaseTextBookIds = setOf(10L),
+        )
+        assertEquals(2, computeBaseProvenance(storedSrcBook = 10L, storedTgtMeta = tgtMeta))
+    }
+
+    // A link whose stored source is only in the INFERRED ("X on Y" title) set
+    // → baseProvenance 1.
+    @Test
+    fun inferredBaseTextYieldsProvenanceOne() {
+        val tgtMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            baseTextBookIds = setOf(10L),
+            inferredBaseTextBookIds = setOf(10L),
+        )
+        assertEquals(1, computeBaseProvenance(storedSrcBook = 10L, storedTgtMeta = tgtMeta))
+    }
+
+    // The relation exists only via density-chaining (in baseTextBookIds but in
+    // neither the declared nor the inferred provenance set) → baseProvenance 0.
+    @Test
+    fun densityChainedBaseTextYieldsProvenanceZero() {
+        val tgtMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            baseTextBookIds = setOf(10L),
+            sefariaDeclaredBaseTextBookIds = emptySet(),
+            inferredBaseTextBookIds = emptySet(),
+        )
+        assertEquals(0, computeBaseProvenance(storedSrcBook = 10L, storedTgtMeta = tgtMeta))
+        // No target metadata at all → 0.
+        assertEquals(0, computeBaseProvenance(storedSrcBook = 10L, storedTgtMeta = null))
+    }
+
+    // Declared wins over inferred when a book is in both sets.
+    @Test
+    fun declaredWinsOverInferred() {
+        val tgtMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            baseTextBookIds = setOf(10L),
+            sefariaDeclaredBaseTextBookIds = setOf(10L),
+            inferredBaseTextBookIds = setOf(10L),
+        )
+        assertEquals(2, computeBaseProvenance(storedSrcBook = 10L, storedTgtMeta = tgtMeta))
+    }
+
+    // End-to-end orientation → provenance: an oriented COMMENTARY whose CSV had
+    // the dependant as Citation 1 is stored base→dependant (base as source), and
+    // the declared base set on the dependant then yields provenance 2.
+    @Test
+    fun orientedDeclaredLinkResolvesToProvenanceTwo() {
+        // src=20 (dependant, Citation 1), tgt=10 (base). Dependant declares base.
+        val depMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            dependence = Dependence.COMMENTARY,
+            baseTextBookIds = setOf(10L),
+            sefariaDeclaredBaseTextBookIds = setOf(10L),
+        )
+        val baseMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
+
+        val (forward, _) = resolveDirectionalConnectionTypesForMeta(
+            baseType = ConnectionType.COMMENTARY,
+            sourceBookId = 20L, targetBookId = 10L,
+            sourceMeta = depMeta, targetMeta = baseMeta,
+        )
+        // forward == SOURCE means the CSV direction is flipped: stored src=base(10),
+        // stored tgt=dependant(20). Provenance keys off the stored target (dependant).
+        assertEquals(ConnectionType.SOURCE, forward)
+        assertEquals(2, computeBaseProvenance(storedSrcBook = 10L, storedTgtMeta = depMeta))
+    }
+
     // ───── topLevelStructuralIndex ─────
 
     @Test
