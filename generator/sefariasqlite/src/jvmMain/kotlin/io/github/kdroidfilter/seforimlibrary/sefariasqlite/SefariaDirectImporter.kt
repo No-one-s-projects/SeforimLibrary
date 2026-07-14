@@ -38,6 +38,10 @@ class SefariaDirectImporter(
     private val bindings = IdAllocatorBindings(allocator, repository)
     private val sourceName = "Sefaria"
 
+    // Per-type link-import metrics, set once the links phase ran (null otherwise).
+    internal var linkImportMetrics: LinkImportMetrics? = null
+        private set
+
     suspend fun import() = coroutineScope {
         val dbRoot = findDatabaseExportRoot(exportRoot)
         val jsonDir = dbRoot.resolve("json")
@@ -524,6 +528,7 @@ class SefariaDirectImporter(
                 charLevelPending = charLevelPending,
                 refsByPath = refsByPath
             )
+            linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }
 
             // Word-level anchors: resolve the itags embedded in base texts to

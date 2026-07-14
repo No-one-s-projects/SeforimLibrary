@@ -73,6 +73,9 @@ fun main() = runBlocking {
     val jdbcUrl = if (useMemoryDb) "jdbc:sqlite:file:seforim_index_std?mode=memory&cache=shared" else "jdbc:sqlite:$dbPath"
     val driver = JdbcSqliteDriver(url = jdbcUrl)
     val repo = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Warn so this CLI's logs stay visible.
+    Logger.setMinSeverity(Severity.Warn)
 
     if (useMemoryDb) {
         // Seed in-memory DB from disk to avoid disk I/O during indexing
@@ -144,6 +147,8 @@ fun main() = runBlocking {
 
                     // Create a separate read-only connection per worker for concurrent reads
                     val localRepo = SeforimRepository(dbPath, JdbcSqliteDriver(url = jdbcUrl))
+                    // Repository init downgrades global severity — restore per worker.
+                    Logger.setMinSeverity(Severity.Warn)
                     // Slightly increase boost for base books by nudging orderIndex closer to the front
                     val orderIndexForBoost = if (book.isBaseBook) {
                         (book.order.toInt() - 5).coerceAtLeast(1)

@@ -62,6 +62,9 @@ fun main(args: Array<String>) = runBlocking {
     driver.execute(null, SEFORIM_DB_PAGE_SIZE_PRAGMA, 0)
     runCatching { SeforimDb.Schema.create(driver) }
     val repository = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Info so importer logs (incl. per-type counters) stay visible.
+    Logger.setMinSeverity(Severity.Info)
 
     // ─── IdAllocator wiring (delta-update support, DELTA_UPDATE_PLAN.md §3.5) ──
     // Load the previous build_state.db so primary keys remain stable across
@@ -99,6 +102,14 @@ fun main(args: Array<String>) = runBlocking {
             logger = Logger.withTag("SefariaDirect")
         )
         importer.import()
+
+        // Machine-checkable per-type link-import metrics, written as a sibling
+        // of the shipped DB (QA plan §10.5).
+        importer.linkImportMetrics?.let { metrics ->
+            val reportPath = Paths.get("$persistDbPath.link-import-metrics.json")
+            java.nio.file.Files.writeString(reportPath, metrics.toJsonReport())
+            logger.i { "Link-import metrics report written to $reportPath" }
+        } ?: logger.i { "No links phase ran — link-import metrics report not written." }
 
         if (useMemoryDb) {
             // Persist in-memory DB to disk using VACUUM INTO (target must not exist)

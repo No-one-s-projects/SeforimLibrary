@@ -42,9 +42,7 @@ internal class SefariaLinksImporter(
     private val rangedRowsDropped = LongAdder()
 
     // Per-connection-type importer counters (QA plan §10.5). Thread-safe — link
-    // files are processed in parallel. rowsRead/dropped are ROW-level, keyed by
-    // the raw csv-mapped type (OTHER for blank/none rows); resolvedPairs/written
-    // are PAIR-level, keyed by the FINAL per-pair type (after blank→schema upgrade).
+    // files are processed in parallel. Semantics in [LinkImportTypeMetrics].
     private val rowsReadByType = ConcurrentHashMap<ConnectionType, LongAdder>()
     private val rowsDroppedByType = ConcurrentHashMap<ConnectionType, LongAdder>()
     private val resolvedPairsByType = ConcurrentHashMap<ConnectionType, LongAdder>()
@@ -108,17 +106,21 @@ internal class SefariaLinksImporter(
         // Launch batch inserter
         val inserter = launch {
             val batch = mutableListOf<Link>()
+            // written counts ACTUAL insertions: INSERT OR IGNORE dedups on link id,
+            // so a duplicate send must not bump the counter.
+            suspend fun flush() {
+                if (batch.isEmpty()) return
+                val inserted = repository.insertLinksBatchReportingInserted(batch)
+                batch.forEachIndexed { i, link ->
+                    if (inserted[i]) linksWrittenByType.bump(link.connectionType)
+                }
+                batch.clear()
+            }
             for (link in linkChannel) {
                 batch += link
-                if (batch.size >= SefariaImportTuning.LINK_BATCH_SIZE) {
-                    repository.insertLinksBatch(batch)
-                    batch.clear()
-                }
+                if (batch.size >= SefariaImportTuning.LINK_BATCH_SIZE) flush()
             }
-            // Flush remaining
-            if (batch.isNotEmpty()) {
-                repository.insertLinksBatch(batch)
-            }
+            flush()
         }
 
         // Wait for all processors to finish
@@ -150,21 +152,41 @@ internal class SefariaLinksImporter(
                 "rows dropped with unresolved citation=${rangedRowsDropped.sum()}"
         }
 
-        // Per-connection-type importer summary (QA plan §10.5). rowsRead/dropped
-        // are keyed by the raw csv-mapped type; resolvedPairs/written by final type.
-        val allTypes = (rowsReadByType.keys + rowsDroppedByType.keys +
-            resolvedPairsByType.keys + linksWrittenByType.keys).sortedBy { it.name }
+        // Per-connection-type importer summary (QA plan §10.5); semantics in
+        // [LinkImportTypeMetrics].
+        val metrics = metricsSnapshot()
         logger.i {
             buildString {
                 append("Sefaria links importer per-type counters:")
-                for (t in allTypes) {
-                    append("\ntype=${t.name} rowsRead=${rowsReadByType[t]?.sum() ?: 0}")
-                    append(" dropped=${rowsDroppedByType[t]?.sum() ?: 0}")
-                    append(" resolvedPairs=${resolvedPairsByType[t]?.sum() ?: 0}")
-                    append(" written=${linksWrittenByType[t]?.sum() ?: 0}")
+                for ((name, t) in metrics.perType) {
+                    append("\ntype=$name rowsRead=${t.rowsRead}")
+                    append(" dropped=${t.dropped}")
+                    append(" resolvedPairs=${t.resolvedPairs}")
+                    append(" written=${t.written}")
                 }
             }
         }
+    }
+
+    /**
+     * Structured snapshot of the per-type counters, sorted by type name
+     * (deterministic key order). Valid after [processLinksInParallel] returns.
+     */
+    fun metricsSnapshot(): LinkImportMetrics {
+        val names = (rowsReadByType.keys + rowsDroppedByType.keys +
+            resolvedPairsByType.keys + linksWrittenByType.keys)
+            .map { it.name }.toSortedSet()
+        return LinkImportMetrics(
+            names.associateWith { name ->
+                val t = ConnectionType.valueOf(name)
+                LinkImportTypeMetrics(
+                    rowsRead = rowsReadByType[t]?.sum() ?: 0,
+                    dropped = rowsDroppedByType[t]?.sum() ?: 0,
+                    resolvedPairs = resolvedPairsByType[t]?.sum() ?: 0,
+                    written = linksWrittenByType[t]?.sum() ?: 0,
+                )
+            }
+        )
     }
 
     private suspend fun processLinkFile(
@@ -212,10 +234,15 @@ internal class SefariaLinksImporter(
                 // Validate the type BEFORE the empty-citation skip: an unmapped type
                 // must fail the build even on rows whose citations are blank/unresolved.
                 val csvConnectionType = mapCsvConnectionType(conn, "$fileName:$lineNumber")
+                // rowsRead counts EVERY parsed data row, before any skip —
+                // empty-citation rows are read AND dropped.
+                rowsReadByType.bump(csvConnectionType)
                 val c1 = normalizeCitation(row.getOrNull(idxC1).orEmpty())
                 val c2 = normalizeCitation(row.getOrNull(idxC2).orEmpty())
-                if (c1.isEmpty() || c2.isEmpty()) continue
-                rowsReadByType.bump(csvConnectionType)
+                if (c1.isEmpty() || c2.isEmpty()) {
+                    rowsDroppedByType.bump(csvConnectionType)
+                    continue
+                }
                 var rowWroteLink = false
                 // `Conection Type` is blank for ~36% of CSV rows. We try to
                 // recover those via schema metadata inside the inner loop —
@@ -251,6 +278,9 @@ internal class SefariaLinksImporter(
                         val tgtLineIndex = to.lineIndex - 1
                         val srcLine = lineKeyToId[from.path to srcLineIndex] ?: continue
                         val tgtLine = lineKeyToId[to.path to tgtLineIndex] ?: continue
+                        // resolvedPairs: both sides resolved to line ids — counted
+                        // BEFORE heading/self-link filters, keyed by the raw csv type.
+                        resolvedPairsByType.bump(csvConnectionType)
                         // Skip links where source or target is a heading line
                         if (srcLine in headingLineIds || tgtLine in headingLineIds) continue
                         val srcBookId = lineBookId(srcLine, lineIdToBookId)
@@ -330,10 +360,6 @@ internal class SefariaLinksImporter(
                         val baseProvenance =
                             computeBaseProvenance(storedSrcBook, bookMetaById[storedTgtBook])
 
-                        // In the current pipeline every resolved+typed pair is sent, so
-                        // resolvedPairs==written; kept distinct so a future drop between
-                        // resolution and send stays observable.
-                        resolvedPairsByType.bump(storedType)
                         linkChannel.send(
                             Link(
                                 id = linkId,
@@ -346,7 +372,6 @@ internal class SefariaLinksImporter(
                                 baseProvenance = baseProvenance,
                             )
                         )
-                        linksWrittenByType.bump(storedType)
                         rowWroteLink = true
 
                         // Ranged sides: record the range end + per-line coverage.
@@ -689,6 +714,36 @@ internal class SefariaLinksImporter(
         )
     }
 }
+
+/**
+ * Per-connection-type importer counters (QA plan §10.5).
+ *
+ * - [rowsRead]: every parsed non-empty CSV data row, counted BEFORE any skip
+ *   (empty-citation rows included), keyed by the raw csv-mapped type.
+ * - [dropped]: rows that produced no stored link (empty citation, unresolved
+ *   refs, or all pairs filtered), keyed by the raw csv-mapped type.
+ * - [resolvedPairs]: (from,to) pairs whose BOTH citations resolved to line ids,
+ *   counted before heading/self-link filters, keyed by the raw csv-mapped type.
+ * - [written]: links ACTUALLY inserted (INSERT OR IGNORE duplicates excluded),
+ *   keyed by the FINAL stored type (after blank→schema upgrade / direction swap).
+ */
+@kotlinx.serialization.Serializable
+internal data class LinkImportTypeMetrics(
+    val rowsRead: Long,
+    val dropped: Long,
+    val resolvedPairs: Long,
+    val written: Long,
+)
+
+/** Per-type metrics keyed by [ConnectionType] name, sorted for determinism. */
+@kotlinx.serialization.Serializable
+internal data class LinkImportMetrics(val perType: Map<String, LinkImportTypeMetrics>)
+
+private val metricsReportJson = Json { prettyPrint = true }
+
+/** JSON form written next to seforim.db for machine QA checks. */
+internal fun LinkImportMetrics.toJsonReport(): String =
+    metricsReportJson.encodeToString(LinkImportMetrics.serializer(), this)
 
 // Sefaria's aggregate summary exports (header `Text 1,Text 2,Link Count`), not
 // per-link data — skipped by exact filename per the no-fallbacks policy.

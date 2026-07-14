@@ -2253,6 +2253,54 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     /**
+     * Variant of [insertLinksBatch] that reports, per input row, whether the
+     * `INSERT OR IGNORE` actually wrote a new link row (`false` = a row with the
+     * same id already existed and was kept). Requires pre-allocated ids
+     * ([Link.id] > 0); a non-positive id is a hard error.
+     */
+    suspend fun insertLinksBatchReportingInserted(links: List<Link>): List<Boolean> =
+        withContext(Dispatchers.IO) {
+            if (links.isEmpty()) return@withContext emptyList()
+
+            val typeIdCache = mutableMapOf<String, Long>()
+            for (link in links) {
+                val name = link.connectionType.name
+                if (name !in typeIdCache) {
+                    typeIdCache[name] = getOrCreateConnectionType(name)
+                }
+            }
+            links.asSequence().map { it.targetBookId }.distinct().forEach { resolveBookOrderIndex(it) }
+
+            database.transactionWithResult {
+                links.map { link ->
+                    require(link.id > 0) {
+                        "insertLinksBatchReportingInserted requires a pre-allocated link id (got ${link.id})"
+                    }
+                    val connectionTypeId = typeIdCache[link.connectionType.name]
+                        ?: error("Missing connection type id for ${link.connectionType.name}")
+                    // Raw driver.execute so the rows-affected count is observable
+                    // (generated mutators discard it).
+                    val affected = driver.execute(
+                        identifier = null,
+                        sql = "INSERT OR IGNORE INTO link (id, sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, baseProvenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        parameters = 9,
+                    ) {
+                        bindLong(0, link.id)
+                        bindLong(1, link.sourceBookId)
+                        bindLong(2, link.targetBookId)
+                        bindLong(3, link.sourceLineId)
+                        bindLong(4, link.targetLineId)
+                        bindLong(5, link.targetLineIndex.toLong())
+                        bindLong(6, resolveBookOrderIndex(link.targetBookId))
+                        bindLong(7, connectionTypeId)
+                        bindLong(8, link.baseProvenance.toLong())
+                    }.value
+                    affected > 0
+                }
+            }
+        }
+
+    /**
      * Inserts multiple link anchors in a single transaction.
      * Idempotent: rows already present (same linkId/side/charStart) are ignored.
      */

@@ -43,6 +43,9 @@ fun main(args: Array<String>) = runBlocking {
     // otherwise the persisted file would revert to SQLite's 4 KiB default.
     driver.execute(null, SEFORIM_DB_PAGE_SIZE_PRAGMA, 0)
     val repository = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Info so this CLI's logs stay visible.
+    Logger.setMinSeverity(Severity.Info)
 
     try {
         // If using in-memory DB, seed it from base DB on disk if provided
