@@ -9,8 +9,10 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
 import java.io.File
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * One-step conversion: Sefaria export -> SQLite (direct import, sans Otzaria intermédiaire).
@@ -62,6 +64,9 @@ fun main(args: Array<String>) = runBlocking {
     driver.execute(null, SEFORIM_DB_PAGE_SIZE_PRAGMA, 0)
     runCatching { SeforimDb.Schema.create(driver) }
     val repository = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Info so importer logs (incl. per-type counters) stay visible.
+    Logger.setMinSeverity(Severity.Info)
 
     // ─── IdAllocator wiring (delta-update support, DELTA_UPDATE_PLAN.md §3.5) ──
     // Load the previous build_state.db so primary keys remain stable across
@@ -90,7 +95,15 @@ fun main(args: Array<String>) = runBlocking {
         ?.toIntOrNull()
         ?: (System.currentTimeMillis() / 1000).toInt()
 
+    // Path of the persisted DB the metrics report will describe (VACUUM INTO
+    // target for the memory path; the live file otherwise).
+    val persistedDbPath = if (useMemoryDb) persistDbPath else dbPath
+
     try {
+        // Create the output directory up front so a late failure can't leave a
+        // fresh metrics report next to a missing/stale DB.
+        File(persistedDbPath).absoluteFile.parentFile?.mkdirs()
+
         val importer = SefariaDirectImporter(
             exportRoot = exportRoot,
             repository = repository,
@@ -117,6 +130,26 @@ fun main(args: Array<String>) = runBlocking {
             repository.executeRawQuery("VACUUM INTO '$escaped'")
             logger.i { "In-memory DB persisted to $persistDbPath" }
         }
+
+        // Machine-checkable per-type link-import metrics, written as a sibling of
+        // the shipped DB (QA plan §10.5). Written ONLY after the DB is persisted,
+        // and atomically (temp file + ATOMIC_MOVE) so a failed save never leaves a
+        // fresh report beside a stale/missing DB. Shape: [LinkImportMetricsReport].
+        importer.linkImportMetrics?.let { metrics ->
+            val report = LinkImportMetricsReport(
+                dbSchemaVersion = repository.getSchemaMeta("db_schema_version"),
+                dbVersion = repository.getSchemaMeta("db_version"),
+                dbSizeBytes = File(persistedDbPath).length(),
+                insertedByType = metrics.insertedByType,
+                persistedByType = importer.persistedLinkCountsByType ?: emptyMap(),
+            )
+            val reportPath = Paths.get("$persistDbPath.link-import-metrics.json")
+            val dir = reportPath.toAbsolutePath().parent
+            val tmp = Files.createTempFile(dir, "link-import-metrics", ".json.tmp")
+            Files.writeString(tmp, report.toJsonReport())
+            Files.move(tmp, reportPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            logger.i { "Link-import metrics report written to $reportPath" }
+        } ?: logger.i { "No links phase ran — link-import metrics report not written." }
 
         // Persist build_state.db so the next build re-uses the same primary keys.
         runCatching {

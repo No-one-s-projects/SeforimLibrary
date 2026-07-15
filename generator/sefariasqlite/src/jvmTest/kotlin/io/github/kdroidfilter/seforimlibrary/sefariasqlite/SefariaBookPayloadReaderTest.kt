@@ -61,7 +61,87 @@ class SefariaBookPayloadReaderTest {
         assertEquals("תיאור ארוך ומפורט של הספר וכל ענייניו", payload.description)
     }
 
+    @Test
+    fun declaredBaseAndCollectiveTitlesFromSchema() = runBlocking {
+        val payload = readSingle("Rashi_on_Genesis", "Rashi on Genesis", rashiSchemaJson, rashiMergedJson)
+
+        // rawDependence is trim + lowercase; collective titles come from schemas.
+        assertEquals("commentary", payload.rawDependence)
+        assertEquals("Rashi", payload.collectiveTitleEn)
+        assertEquals("רש\"י", payload.collectiveTitleHe)
+        // base_text_titles → declared set; the title-pattern set stays empty.
+        assertTrue(payload.declaredBaseTextTitleKeys.isNotEmpty())
+        assertTrue(payload.inferredBaseTextTitleKeys.isEmpty())
+    }
+
+    @Test
+    fun inferredBaseFromTitleWhenNoDeclaredBase() = runBlocking {
+        val payload = readSingle("Bartenura_on_Genesis", "Bartenura on Genesis", bartenuraSchemaJson, rashiMergedJson)
+
+        // No base_text_titles in schema → declared empty, inferred recovered
+        // from the "X on Y" title pattern.
+        assertTrue(payload.declaredBaseTextTitleKeys.isEmpty())
+        assertTrue(payload.inferredBaseTextTitleKeys.isNotEmpty())
+    }
+
     companion object {
+        private fun readSingle(folder: String, title: String, schema: String, merged: String) = runBlocking {
+            val tempDir = Files.createTempDirectory("seforim-test")
+            val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+            val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+            val bookDir = Files.createDirectories(jsonDir.resolve(folder))
+            Files.writeString(schemaDir.resolve("$title.json"), schema)
+            Files.writeString(bookDir.resolve("merged.json"), merged)
+            val reader = SefariaBookPayloadReader(
+                Json { ignoreUnknownKeys = true; coerceInputValues = true },
+                Logger.withTag("SefariaBookPayloadReaderTest")
+            )
+            val schemaLookup = reader.buildSchemaLookup(schemaDir)
+            reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup).single()
+        }
+
+        private val rashiSchemaJson = """
+            {
+              "title": "Rashi on Genesis",
+              "heTitle": "רש\"י על בראשית",
+              "dependence": "Commentary",
+              "collective_title": { "en": "Rashi", "he": "רש\"י" },
+              "base_text_titles": ["Genesis"],
+              "schema": {
+                "title": "Rashi on Genesis",
+                "heTitle": "רש\"י על בראשית",
+                "depth": 1,
+                "addressTypes": ["Integer"],
+                "sectionNames": ["Paragraph"],
+                "heSectionNames": ["פסקה"]
+              }
+            }
+        """.trimIndent()
+
+        private val bartenuraSchemaJson = """
+            {
+              "title": "Bartenura on Genesis",
+              "heTitle": "ברטנורא על בראשית",
+              "dependence": "Commentary",
+              "schema": {
+                "title": "Bartenura on Genesis",
+                "heTitle": "ברטנורא על בראשית",
+                "depth": 1,
+                "addressTypes": ["Integer"],
+                "sectionNames": ["Paragraph"],
+                "heSectionNames": ["פסקה"]
+              }
+            }
+        """.trimIndent()
+
+        private val rashiMergedJson = """
+            {
+              "title": "Rashi on Genesis",
+              "heTitle": "רש\"י על בראשית",
+              "text": ["comment one", "comment two"]
+            }
+        """.trimIndent()
+
         private val schemaJson = """
             {
               "title": "Tur",

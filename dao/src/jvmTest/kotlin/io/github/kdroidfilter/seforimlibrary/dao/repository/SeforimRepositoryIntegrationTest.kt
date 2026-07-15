@@ -526,6 +526,130 @@ class SeforimRepositoryIntegrationTest {
         )
     }
 
+    @Test
+    fun `link baseProvenance round-trips through insert and read`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val categoryId = repository.insertCategory(
+            Category(parentId = null, title = "Cat", level = 0, order = 1)
+        )
+        val baseBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Base", order = 1f)
+        )
+        val depBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Dep", order = 2f)
+        )
+        val baseLineId = repository.insertLine(Line(bookId = baseBookId, lineIndex = 0, content = "base"))
+        val depLineId = repository.insertLine(Line(bookId = depBookId, lineIndex = 0, content = "dep"))
+
+        val linkId = repository.insertLink(
+            Link(
+                sourceBookId = baseBookId,
+                targetBookId = depBookId,
+                sourceLineId = baseLineId,
+                targetLineId = depLineId,
+                targetLineIndex = 0,
+                connectionType = ConnectionType.COMMENTARY,
+                baseProvenance = 2,
+            )
+        )
+
+        assertEquals(2, repository.getLink(linkId)?.baseProvenance)
+    }
+
+    // Exercises the REAL selectInverseLinksByTargetLineIds mirror query: links are
+    // inserted in provenance order 0,1,2 with every tie-breaker (isBaseBook,
+    // orderIndex) stacked toward that insertion order, so the [2,1,0] output can
+    // only come from `ORDER BY l.baseProvenance DESC` in LinkQueries.sq.
+    @Test
+    fun `SOURCE view orders by baseProvenance DESC ahead of all tie-breakers`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val categoryId = repository.insertCategory(
+            Category(parentId = null, title = "Cat", level = 0, order = 1)
+        )
+        // Base books: provenance-0 book gets the STRONGEST tie-breakers
+        // (isBaseBook=true, lowest orderIndex); provenance-2 the weakest.
+        val noneBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "None", order = 1f, isBaseBook = true)
+        )
+        val inferredBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Inferred", order = 2f, isBaseBook = false)
+        )
+        val declaredBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Declared", order = 3f, isBaseBook = false)
+        )
+        val depBookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Dep", order = 4f, isBaseBook = false)
+        )
+        val noneLineId = repository.insertLine(Line(bookId = noneBookId, lineIndex = 0, content = "none"))
+        val inferredLineId = repository.insertLine(Line(bookId = inferredBookId, lineIndex = 0, content = "inferred"))
+        val declaredLineId = repository.insertLine(Line(bookId = declaredBookId, lineIndex = 0, content = "declared"))
+        val depLineId = repository.insertLine(Line(bookId = depBookId, lineIndex = 0, content = "dep"))
+
+        // Deliberately REVERSED provenance insertion order: none(0), inferred(1), declared(2).
+        for ((bookId, lineId, provenance) in listOf(
+            Triple(noneBookId, noneLineId, 0),
+            Triple(inferredBookId, inferredLineId, 1),
+            Triple(declaredBookId, declaredLineId, 2),
+        )) {
+            repository.insertLink(
+                Link(
+                    sourceBookId = bookId,
+                    targetBookId = depBookId,
+                    sourceLineId = lineId,
+                    targetLineId = depLineId,
+                    targetLineIndex = 0,
+                    connectionType = ConnectionType.COMMENTARY,
+                    baseProvenance = provenance,
+                )
+            )
+        }
+
+        // includeSources=true routes through selectInverseLinksByTargetLineIds.
+        val sources = repository.getCommentariesForLines(
+            lineIds = listOf(depLineId),
+            includeSources = true,
+        )
+
+        assertEquals(3, sources.size)
+        assertEquals(
+            listOf(declaredBookId, inferredBookId, noneBookId),
+            sources.map { it.link.targetBookId },
+            "SOURCE view must return provenance sequence [2,1,0] (declared, inferred, none)"
+        )
+    }
+
+    // Plan commit 9: selectCommentatorsByBook now spans the full dependent group,
+    // so a MIDRASH link (not just COMMENTARY/TARGUM) must surface as a commentator.
+    @Test
+    fun `getAvailableCommentators includes MIDRASH-typed links`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f)
+        )
+        val midrashBookId = repository.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Bereshit Rabbah", order = 2f)
+        )
+        val baseLineId = repository.insertLine(Line(bookId = baseBookId, lineIndex = 0, content = "Genesis 1:1"))
+        val midrashLineId = repository.insertLine(Line(bookId = midrashBookId, lineIndex = 0, content = "Midrash on 1:1"))
+
+        repository.insertLink(
+            Link(
+                sourceBookId = baseBookId,
+                targetBookId = midrashBookId,
+                sourceLineId = baseLineId,
+                targetLineId = midrashLineId,
+                targetLineIndex = 0,
+                connectionType = ConnectionType.MIDRASH,
+            )
+        )
+
+        val commentators = repository.getAvailableCommentators(baseBookId)
+        assertEquals(1, commentators.size)
+        assertEquals(midrashBookId, commentators.first().bookId)
+        assertEquals("Bereshit Rabbah", commentators.first().title)
+    }
+
     // ==================== Virtual SOURCE view tests ====================
 
     // Validates the single-direction storage + virtual SOURCE view contract:
@@ -611,5 +735,118 @@ class SeforimRepositoryIntegrationTest {
         val maxId = repository.getMaxLineId()
 
         assertEquals(lastLineId, maxId)
+    }
+
+    // ==================== Book dependence-metadata Tests ====================
+
+    @Test
+    fun `insertBook round-trips dependence metadata`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val categoryId = repository.insertCategory(Category(parentId = null, title = "Torah", level = 0, order = 1))
+        val bookId = repository.insertBook(
+            Book(
+                categoryId = categoryId,
+                sourceId = sourceId,
+                title = "Rashi on Genesis",
+                order = 1f,
+                dependenceType = "Commentary",
+                collectiveTitleHe = "רש\"י",
+                collectiveTitleEn = "Rashi"
+            )
+        )
+
+        val book = repository.getBook(bookId)
+        assertNotNull(book)
+        assertEquals("Commentary", book.dependenceType)
+        assertEquals("רש\"י", book.collectiveTitleHe)
+        assertEquals("Rashi", book.collectiveTitleEn)
+    }
+
+    @Test
+    fun `insertBook leaves dependence metadata null by default`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val categoryId = repository.insertCategory(Category(parentId = null, title = "Torah", level = 0, order = 1))
+        val bookId = repository.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "Genesis", order = 1f)
+        )
+
+        val book = repository.getBook(bookId)
+        assertNotNull(book)
+        assertNull(book.dependenceType)
+        assertNull(book.collectiveTitleHe)
+        assertNull(book.collectiveTitleEn)
+    }
+
+    // ==================== book_base_text junction Tests ====================
+
+    @Test
+    fun `book_base_text select returns bases and dependents`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+        val depId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+
+        repository.insertBookBaseText(depId, baseId)
+
+        val bases = repository.getBaseBooks(depId)
+        assertEquals(1, bases.size)
+        assertEquals(baseId, bases.first().id)
+
+        val dependents = repository.getDependentBooks(baseId)
+        assertEquals(1, dependents.size)
+        assertEquals(depId, dependents.first().id)
+    }
+
+    @Test
+    fun `insertBookBaseText is idempotent on duplicate`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+        val depId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+
+        repository.insertBookBaseText(depId, baseId)
+        repository.insertBookBaseText(depId, baseId)
+
+        assertEquals(1, repository.getBaseBooks(depId).size)
+    }
+
+    @Test
+    fun `deleteBookBaseTexts removes relations of a book`() = runBlocking {
+        val sourceId = repository.insertSource("Sefaria")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        val baseId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+        val depId = repository.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+        repository.insertBookBaseText(depId, baseId)
+
+        repository.deleteBookBaseTexts(depId)
+
+        assertTrue(repository.getBaseBooks(depId).isEmpty())
+    }
+
+    @Test
+    fun `deleting a book cascades book_base_text on both sides`() = runBlocking {
+        // Dedicated FK-enforcing driver: the shared repository driver leaves FKs off.
+        val fkDriver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        fkDriver.execute(null, "PRAGMA foreign_keys=ON", 0)
+        val repo = SeforimRepository(":memory:", fkDriver)
+        try {
+            val sourceId = repo.insertSource("Sefaria")
+            val catId = repo.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+            val baseId = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Genesis", order = 1f))
+            val depId = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Rashi", order = 2f))
+            repo.insertBookBaseText(depId, baseId)
+
+            // Deleting the base book removes the row via baseBookId cascade.
+            fkDriver.execute(null, "DELETE FROM book WHERE id = $baseId", 0)
+            assertTrue(repo.getBaseBooks(depId).isEmpty())
+
+            // Re-create and delete from the dependent side.
+            val baseId2 = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "Exodus", order = 3f))
+            repo.insertBookBaseText(depId, baseId2)
+            fkDriver.execute(null, "DELETE FROM book WHERE id = $depId", 0)
+            assertTrue(repo.getDependentBooks(baseId2).isEmpty())
+        } finally {
+            fkDriver.close()
+        }
     }
 }

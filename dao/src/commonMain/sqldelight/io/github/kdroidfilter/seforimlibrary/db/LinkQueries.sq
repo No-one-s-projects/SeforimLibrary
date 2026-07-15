@@ -123,7 +123,7 @@ JOIN book b ON l.targetBookId = b.id
 LEFT JOIN book_author ba ON b.id = ba.bookId
 LEFT JOIN author a ON ba.authorId = a.id
 WHERE l.sourceBookId = ?
-AND ct.name IN ('COMMENTARY', 'TARGUM')
+AND ct.name IN ('COMMENTARY', 'SUPER_COMMENTARY', 'TARGUM', 'MIDRASH', 'PARSHANUT', 'DIBUR_HAMATCHIL', 'ELUCIDATION')
 GROUP BY l.targetBookId, b.title, a.name
 ORDER BY b.orderIndex, b.title;
 
@@ -131,11 +131,11 @@ selectIdsBySourceAndTargetLine:
 SELECT id FROM link WHERE sourceLineId = ? AND targetLineId = ?;
 
 insert:
-INSERT INTO link (sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, isDeclaredBase)
+INSERT INTO link (sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, baseProvenance)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
 insertWithId:
-INSERT OR IGNORE INTO link (id, sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, isDeclaredBase)
+INSERT OR IGNORE INTO link (id, sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, baseProvenance)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 delete:
@@ -198,9 +198,9 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
+ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
 selectInverseLinkSummariesByTargetLineIds:
 SELECT
@@ -217,9 +217,9 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
+ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
 selectInverseLinksByTargetLineIdsPaged:
 SELECT
@@ -237,9 +237,9 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
+ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
 LIMIT ? OFFSET ?;
 
 selectInverseLinksByTargetLineIdsAndSourcesPaged:
@@ -258,9 +258,9 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
+ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
 LIMIT ? OFFSET ?;
 
 selectInverseLinksByTargetLineIdsAndSourcesPagedDistinct:
@@ -279,10 +279,10 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceLineId
-ORDER BY MAX(l.isDeclaredBase) DESC, b.isBaseBook DESC, b.orderIndex, MIN(sl.lineIndex)
+ORDER BY MAX(l.baseProvenance) DESC, b.isBaseBook DESC, b.orderIndex, MIN(sl.lineIndex)
 LIMIT ? OFFSET ?;
 
 selectInverseLinksByTargetLineIdsPagedDistinct:
@@ -301,10 +301,10 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceLineId
-ORDER BY MAX(l.isDeclaredBase) DESC, b.isBaseBook DESC, b.orderIndex, MIN(sl.lineIndex)
+ORDER BY MAX(l.baseProvenance) DESC, b.isBaseBook DESC, b.orderIndex, MIN(sl.lineIndex)
 LIMIT ? OFFSET ?;
 
 selectInverseLinkCharCountsByTargetLineIds:
@@ -313,9 +313,9 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
+ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
 selectInverseLinkCharCountsByTargetLineIdsAndSources:
 SELECT sl.charCount FROM link l
@@ -323,9 +323,9 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
 WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-ORDER BY l.isDeclaredBase DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
+ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
 -- "Source-side commentators" — books that appear as base/source for this book's lines.
 selectSourcesByBook:
@@ -336,7 +336,7 @@ JOIN book b ON l.sourceBookId = b.id
 LEFT JOIN book_author ba ON b.id = ba.bookId
 LEFT JOIN author a ON ba.authorId = a.id
 WHERE l.targetBookId = ?
-  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT')
+  AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceBookId, b.title, a.name
-ORDER BY MAX(l.isDeclaredBase) DESC, b.isBaseBook DESC, b.orderIndex, b.title;
+ORDER BY MAX(l.baseProvenance) DESC, b.isBaseBook DESC, b.orderIndex, b.title;

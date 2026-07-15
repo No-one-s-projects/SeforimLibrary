@@ -149,6 +149,9 @@ project(":generator-common").tasks.matching { it.name == "producePatchAndVerify"
     // invoked directly (e.g. for a producer-only e2e), without requiring
     // generateSeforimDb to exist in :generator-common.
     mustRunAfter(rootProject.tasks.named("generateSeforimDb"))
+    // The stamp writes schema_meta.db_schema_version, which resolveSchemaVersion
+    // reads — must land before the producer runs in a single-invocation build.
+    mustRunAfter(project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" })
     // Map the umbrella task's -P props onto the CLI's gradle props.
     val prev = providers.gradleProperty("prevReleaseDb").orNull
     val from = providers.gradleProperty("fromVersion").orNull

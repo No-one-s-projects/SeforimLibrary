@@ -39,6 +39,9 @@ fun main(args: Array<String>) = runBlocking {
     val jdbcUrl = "jdbc:sqlite:$dbPath"
     val driver = JdbcSqliteDriver(url = jdbcUrl)
     val repository = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Info so this CLI's logs stay visible.
+    Logger.setMinSeverity(Severity.Info)
 
     val sourceDir = System.getProperty("sourceDir")
         ?: System.getenv("OTZARIA_SOURCE_DIR")

@@ -82,6 +82,9 @@ fun main(args: Array<String>) = runBlocking {
     // Ensure schema exists on a brand-new DB before repository init (idempotent)
     runCatching { SeforimDb.Schema.create(driver) }
     val repository = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Info so this CLI's logs stay visible.
+    Logger.setMinSeverity(Severity.Info)
 
     if (useMemoryDb && appendExistingDb) {
         val baseDbPath = System.getProperty("baseDb")

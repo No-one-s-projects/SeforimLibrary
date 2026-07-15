@@ -47,6 +47,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
 
     // Book-attribute junctions — depend on book + author/topic/pubPlace/pubDate/generation.
     PatchTable("book_author",        listOf("bookId", "authorId"),       updatable = false),
+    PatchTable("book_base_text",     listOf("bookId", "baseBookId"),     updatable = false),
     PatchTable("book_topic",         listOf("bookId", "topicId"),        updatable = false),
     PatchTable("book_pub_place",     listOf("bookId", "pubPlaceId"),     updatable = false),
     PatchTable("book_pub_date",      listOf("bookId", "pubDateId"),      updatable = false),

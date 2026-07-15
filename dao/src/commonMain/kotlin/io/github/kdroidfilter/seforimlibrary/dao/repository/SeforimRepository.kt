@@ -677,6 +677,31 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d{"Linked author $authorId to book $bookId"}
     }
 
+    /**
+     * Records a declared base-text relation ([bookId] depends on [baseBookId]).
+     * Idempotent: re-inserting an existing pair is a no-op (ON CONFLICT DO NOTHING).
+     */
+    suspend fun insertBookBaseText(bookId: Long, baseBookId: Long) = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.insert(bookId, baseBookId)
+    }
+
+    /** Removes all base-text relations of [bookId] (used before re-import). */
+    suspend fun deleteBookBaseTexts(bookId: Long) = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.deleteByBook(bookId)
+    }
+
+    /** Returns the base books that [bookId] depends on, ordered by orderIndex then title. */
+    suspend fun getBaseBooks(bookId: Long): List<Book> = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.selectBasesByBook(bookId).executeAsList()
+            .map { it.toModel(json) }
+    }
+
+    /** Returns the books that depend on [baseBookId], ordered by orderIndex then title. */
+    suspend fun getDependentBooks(baseBookId: Long): List<Book> = withContext(Dispatchers.IO) {
+        database.bookBaseTextQueriesQueries.selectDependentsByBase(baseBookId).executeAsList()
+            .map { it.toModel(json) }
+    }
+
     suspend fun getBookByTitle(title: String): Book? = withContext(Dispatchers.IO) {
         val bookData = database.bookQueriesQueries.selectByTitle(title).executeAsOneOrNull() ?: return@withContext null
         val authors = getBookAuthors(bookData.id)
@@ -920,7 +945,10 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 hasSourceConnection = if (book.hasSourceConnection) 1 else 0,
                 hasAltStructures = if (book.hasAltStructures) 1 else 0,
                 hasTeamim = if (book.hasTeamim) 1 else 0,
-                hasNekudot = if (book.hasNekudot) 1 else 0
+                hasNekudot = if (book.hasNekudot) 1 else 0,
+                dependenceType = book.dependenceType,
+                collectiveTitleHe = book.collectiveTitleHe,
+                collectiveTitleEn = book.collectiveTitleEn
             )
             logger.d{"Used insertWithId for book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}"}
 
@@ -979,7 +1007,10 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 hasSourceConnection = if (book.hasSourceConnection) 1 else 0,
                 hasAltStructures = if (book.hasAltStructures) 1 else 0,
                 hasTeamim = if (book.hasTeamim) 1 else 0,
-                hasNekudot = if (book.hasNekudot) 1 else 0
+                hasNekudot = if (book.hasNekudot) 1 else 0,
+                dependenceType = book.dependenceType,
+                collectiveTitleHe = book.collectiveTitleHe,
+                collectiveTitleEn = book.collectiveTitleEn
             )
             val id = database.bookQueriesQueries.lastInsertRowId().executeAsOne()
             logger.d{"Used insert for book '${book.title}', got ID: $id with categoryId: ${book.categoryId}"}
@@ -1676,6 +1707,34 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         count
     }
 
+    /**
+     * Authoritative final per-connection-type link counts:
+     * `SELECT ct.name, COUNT(*) FROM link JOIN connection_type GROUP BY name`.
+     * Reflects the DB's current state — call AFTER any retyping (e.g. cross-corpus
+     * demotion) to obtain the persisted split. Types with zero rows are absent.
+     */
+    suspend fun countLinksGroupedByType(): Map<String, Long> = withContext(Dispatchers.IO) {
+        val result = LinkedHashMap<String, Long>()
+        driver.executeQuery(
+            identifier = null,
+            sql = """
+                SELECT ct.name, COUNT(*)
+                FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
+                GROUP BY ct.name
+            """.trimIndent(),
+            mapper = { cursor: SqlCursor ->
+                while (cursor.next().value) {
+                    val name = cursor.getString(0)
+                    val count = cursor.getLong(1)
+                    if (name != null && count != null) result[name] = count
+                }
+                QueryResult.Value(Unit)
+            },
+            parameters = 0
+        ).await()
+        result
+    }
+
     suspend fun getCommentariesForLines(
         lineIds: List<Long>,
         activeCommentatorIds: Set<Long> = emptySet(),
@@ -2135,7 +2194,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 targetLineIndex = link.targetLineIndex.toLong(),
                 targetBookOrderIndex = resolveBookOrderIndex(link.targetBookId),
                 connectionTypeId = connectionTypeId,
-                isDeclaredBase = if (link.isDeclaredBase) 1L else 0L,
+                baseProvenance = link.baseProvenance.toLong(),
             )
             val linkId = database.linkQueriesQueries.lastInsertRowId().executeAsOne()
             logger.d{"Repository inserted link with ID: $linkId"}
@@ -2192,7 +2251,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     ?: error("Missing connection type id for ${link.connectionType.name}")
                 val targetBookOrderIndex = resolveBookOrderIndex(link.targetBookId)
 
-                val declaredFlag: Long = if (link.isDeclaredBase) 1L else 0L
+                val provenance: Long = link.baseProvenance.toLong()
                 if (link.id > 0) {
                     database.linkQueriesQueries.insertWithId(
                         id = link.id,
@@ -2203,7 +2262,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                         targetLineIndex = link.targetLineIndex.toLong(),
                         targetBookOrderIndex = targetBookOrderIndex,
                         connectionTypeId = connectionTypeId,
-                        isDeclaredBase = declaredFlag,
+                        baseProvenance = provenance,
                     )
                 } else {
                     database.linkQueriesQueries.insert(
@@ -2214,12 +2273,60 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                         targetLineIndex = link.targetLineIndex.toLong(),
                         targetBookOrderIndex = targetBookOrderIndex,
                         connectionTypeId = connectionTypeId,
-                        isDeclaredBase = declaredFlag,
+                        baseProvenance = provenance,
                     )
                 }
             }
         }
     }
+
+    /**
+     * Variant of [insertLinksBatch] that reports, per input row, whether the
+     * `INSERT OR IGNORE` actually wrote a new link row (`false` = a row with the
+     * same id already existed and was kept). Requires pre-allocated ids
+     * ([Link.id] > 0); a non-positive id is a hard error.
+     */
+    suspend fun insertLinksBatchReportingInserted(links: List<Link>): List<Boolean> =
+        withContext(Dispatchers.IO) {
+            if (links.isEmpty()) return@withContext emptyList()
+
+            val typeIdCache = mutableMapOf<String, Long>()
+            for (link in links) {
+                val name = link.connectionType.name
+                if (name !in typeIdCache) {
+                    typeIdCache[name] = getOrCreateConnectionType(name)
+                }
+            }
+            links.asSequence().map { it.targetBookId }.distinct().forEach { resolveBookOrderIndex(it) }
+
+            database.transactionWithResult {
+                links.map { link ->
+                    require(link.id > 0) {
+                        "insertLinksBatchReportingInserted requires a pre-allocated link id (got ${link.id})"
+                    }
+                    val connectionTypeId = typeIdCache[link.connectionType.name]
+                        ?: error("Missing connection type id for ${link.connectionType.name}")
+                    // Raw driver.execute so the rows-affected count is observable
+                    // (generated mutators discard it).
+                    val affected = driver.execute(
+                        identifier = null,
+                        sql = "INSERT OR IGNORE INTO link (id, sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, baseProvenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        parameters = 9,
+                    ) {
+                        bindLong(0, link.id)
+                        bindLong(1, link.sourceBookId)
+                        bindLong(2, link.targetBookId)
+                        bindLong(3, link.sourceLineId)
+                        bindLong(4, link.targetLineId)
+                        bindLong(5, link.targetLineIndex.toLong())
+                        bindLong(6, resolveBookOrderIndex(link.targetBookId))
+                        bindLong(7, connectionTypeId)
+                        bindLong(8, link.baseProvenance.toLong())
+                    }.value
+                    affected > 0
+                }
+            }
+        }
 
     /**
      * Inserts multiple link anchors in a single transaction.
@@ -2931,7 +3038,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         targetLineId: Long,
         targetLineIndex: Long,
         connectionTypeId: Long,
-        isDeclaredBase: Boolean = false,
+        baseProvenance: Int = 0,
     ) = withContext(Dispatchers.IO) {
         database.linkQueriesQueries.insertWithId(
             id = id,
@@ -2942,7 +3049,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             targetLineIndex = targetLineIndex,
             targetBookOrderIndex = resolveBookOrderIndex(targetBookId),
             connectionTypeId = connectionTypeId,
-            isDeclaredBase = if (isDeclaredBase) 1L else 0L,
+            baseProvenance = baseProvenance.toLong(),
         )
     }
 

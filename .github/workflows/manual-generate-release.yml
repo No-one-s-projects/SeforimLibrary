@@ -307,6 +307,29 @@ jobs:
             -PlinkerStrict=true \
             --no-daemon --stacktrace
 
+      # ─── QA gate on the full DB (§10) ──────────────────────────────────────
+      # Runs after LINKER inject so the DB is complete. --require-all makes any
+      # skipped check a hard failure (e.g. a missing metrics report), so a
+      # release can never publish with §10.5 silently un-run. The metrics report
+      # is emitted at the Sefaria stage; on the full DB check5 compares per-type
+      # counts with ≥ semantics automatically (no --sefaria-stage — the DB has
+      # also accumulated havrouta/otzaria/linker links by now).
+      #
+      # --expect-snapshot is intentionally NOT passed: inputs are unpinned (plan
+      # 10א — git clone --depth 1 of Sefaria HEAD), so the snapshot baselines
+      # drift; each check derives its expected values from THIS build's schemas.
+      # python3 (stdlib only) is the runtime; verify it like the deps script does
+      # for sqlite3, then fail the job on any nonzero exit.
+      - name: QA — run §10 checks on the full DB (required)
+        run: |
+          set -euo pipefail
+          command -v python3
+          python3 scripts/qa/run_all.py \
+            --db build/seforim.db \
+            --sefaria-dir generator/sefariasqlite/build/sefaria \
+            --metrics build/seforim.db.link-import-metrics.json \
+            --require-all
+
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
       # Each iteration downloads + decompresses, runs the producer, then
@@ -315,7 +338,20 @@ jobs:
         if: steps.discover.outputs.has_prev == 'true'
         run: |
           set -euo pipefail
+          # קורא db_schema_version מ-DB; טבלה/שורה חסרה → ERROR (release DB חייב מוטבע).
+          # sqlite3 זמין ברנרים ה-self-hosted (בשימוש גם בוורקפלואי delta-real-diff-*).
+          read_schema() {
+            local db="$1" v
+            if ! v=$(sqlite3 "$db" "SELECT value FROM schema_meta WHERE key='db_schema_version'" 2>/dev/null); then
+              echo "::error::schema_meta missing/unreadable in $db (release DB must be stamped)" >&2
+              return 1
+            fi
+            [ -n "$v" ] || { echo "::error::db_schema_version row missing in $db (release DB must be stamped)" >&2; return 1; }
+            printf '%s' "$v"
+          }
           THIS_VER=${{ steps.discover.outputs.db_version }}
+          THIS_SCHEMA=$(read_schema build/seforim.db) || exit 1
+          echo "THIS DB schema version = $THIS_SCHEMA"
           mkdir -p patches prev-dbs
           for OFFSET in $PATCH_OFFSETS; do
             TARGET_VER=$((THIS_VER - OFFSET))
@@ -337,6 +373,15 @@ jobs:
             unzstd -c prev-dbs/seforim.db.zst > prev-dbs/seforim.db
             PREV_DB=prev-dbs/seforim.db
             test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
+
+            # אין patch חוצה-סכמה: אם הסכמה של ה-prev שונה — דלג על ה-anchor הזה בלבד
+            # (פרסום ה-bundle המלא נמשך). schema_meta חסר → ERROR ב-read_schema.
+            PREV_SCHEMA=$(read_schema "$PREV_DB") || exit 1
+            if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
+              echo "schema $PREV_SCHEMA != $THIS_SCHEMA — cross-schema delta unsupported, skip anchor"
+              rm -rf prev-dbs
+              continue
+            fi
 
             ./gradlew :generator-common:producePatchAndVerify \
               -PprevDb=$PWD/$PREV_DB \

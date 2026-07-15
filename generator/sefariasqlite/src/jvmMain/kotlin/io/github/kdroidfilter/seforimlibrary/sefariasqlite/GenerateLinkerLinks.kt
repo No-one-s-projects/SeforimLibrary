@@ -57,6 +57,9 @@ fun main(args: Array<String>) = runBlocking {
 
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
     val repository = SeforimRepository(dbPath, driver)
+    // The repository init downgrades the GLOBAL kermit severity to Assert;
+    // restore Info so this CLI's logs stay visible.
+    Logger.setMinSeverity(Severity.Info)
     val buildStatePath = Paths.get(prop("buildStatePath", null) ?: "$dbPath.buildstate")
     val prev = buildStatePath.takeIf { Files.exists(it) }
     val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))

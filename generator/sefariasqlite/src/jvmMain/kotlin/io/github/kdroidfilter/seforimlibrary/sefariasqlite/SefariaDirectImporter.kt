@@ -38,6 +38,16 @@ class SefariaDirectImporter(
     private val bindings = IdAllocatorBindings(allocator, repository)
     private val sourceName = "Sefaria"
 
+    // Insert-time (PRE-demotion) per-type link-import metrics, set once the links
+    // phase ran (null otherwise). See [SefariaLinksImporter.metricsSnapshot].
+    internal var linkImportMetrics: LinkImportMetrics? = null
+        private set
+
+    // Authoritative POST-demotion per-type link counts (name → COUNT(*)), read
+    // from the DB after demoteCrossCorpusDependantLinks(). Null unless links ran.
+    internal var persistedLinkCountsByType: Map<String, Long>? = null
+        private set
+
     suspend fun import() = coroutineScope {
         val dbRoot = findDatabaseExportRoot(exportRoot)
         val jsonDir = dbRoot.resolve("json")
@@ -193,11 +203,18 @@ class SefariaDirectImporter(
         val allRefsWithPath = mutableListOf<RefEntry>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
+        // Collected in priority order during the book loop; the title→bookId
+        // index is built from it in two global phases AFTER the loop so a
+        // primary title always beats any alias (see buildNormalizedTitleToBookId).
+        val titleIndexEntries = mutableListOf<BookTitleIndexEntry>()
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
-        // Deferred base_text_titles → bookId resolution. We can't resolve at
+        // Deferred base-text-key → bookId resolution. We can't resolve at
         // book-insert time because a commentary's base text may not have been
-        // inserted yet. Resolved in a second pass after the main loop.
-        val pendingBaseTextKeysByBookId = ConcurrentHashMap<Long, List<String>>()
+        // inserted yet. Resolved in a second pass after the main loop. Declared
+        // (base_text_titles) and inferred ("X on Y") keys stay in separate maps
+        // so their provenance can be distinguished.
+        val pendingDeclaredKeysByBookId = ConcurrentHashMap<Long, List<String>>()
+        val pendingInferredKeysByBookId = ConcurrentHashMap<Long, List<String>>()
 
         // Batch insertions
         val lineBatch = mutableListOf<Line>()
@@ -253,6 +270,9 @@ class SefariaDirectImporter(
                 pubDates = resolvedPubDates,
                 heShortDesc = payload.heShortDesc,
                 heDesc = payload.description,
+                dependenceType = payload.rawDependence,
+                collectiveTitleHe = payload.collectiveTitleHe,
+                collectiveTitleEn = payload.collectiveTitleEn,
                 notesContent = null,
                 order = bookOrder,
                 topics = emptyList(),
@@ -264,20 +284,15 @@ class SefariaDirectImporter(
             )
             repository.insertBook(book)
 
-            // Track normalized titles (Hebrew/English) for later default-commentator mapping.
-            // Indexes the primary titles plus all Sefaria-known aliases (titleVariants /
-            // heTitleVariants) so title-pattern base parsing ("X on Avot" → Pirkei Avot)
-            // can resolve abbreviated names. `putIfAbsent` keeps priority-ordered primaries
-            // canonical when an alias also matches another book.
-            listOf(payload.heTitle, payload.enTitle).forEach { title ->
-                val normalized = normalizeTitleKey(title)
-                if (normalized != null) {
-                    normalizedTitleToBookId.putIfAbsent(normalized, bookId)
-                }
-            }
-            payload.titleAliasKeys.forEach { alias ->
-                normalizedTitleToBookId.putIfAbsent(alias, bookId)
-            }
+            // Track normalized titles (Hebrew/English) + Sefaria-known aliases
+            // (titleVariants / heTitleVariants) for later default-commentator mapping
+            // and title-pattern base parsing ("X on Avot" → Pirkei Avot). The actual
+            // index is built after the loop so a primary title always beats any alias.
+            titleIndexEntries += BookTitleIndexEntry(
+                bookId = bookId,
+                primaryTitles = listOf(payload.heTitle, payload.enTitle),
+                aliasKeys = payload.titleAliasKeys,
+            )
 
             val catLevel = categoryLevelsById[catId] ?: payload.categoriesHe.lastIndex.coerceAtLeast(0)
             val priorityRank = priorityIndexByPath[normalizedPath]
@@ -290,8 +305,11 @@ class SefariaDirectImporter(
                 baseTextBookIds = emptySet(),
                 collectiveTitleEn = payload.collectiveTitleEn,
             )
-            if (payload.baseTextTitleKeys.isNotEmpty()) {
-                pendingBaseTextKeysByBookId[bookId] = payload.baseTextTitleKeys
+            if (payload.declaredBaseTextTitleKeys.isNotEmpty()) {
+                pendingDeclaredKeysByBookId[bookId] = payload.declaredBaseTextTitleKeys
+            }
+            if (payload.inferredBaseTextTitleKeys.isNotEmpty()) {
+                pendingInferredKeysByBookId[bookId] = payload.inferredBaseTextTitleKeys
             }
 
             val refsForBook = payload.refEntries.map { it.copy(path = bookPath) }
@@ -394,6 +412,12 @@ class SefariaDirectImporter(
 
         logger.i { "Inserted all books and lines" }
 
+        // Build the title→bookId index in two global phases (all primaries, then
+        // all aliases) so a primary title always beats any alias regardless of
+        // priority-order interleaving. Consumed by default mappings, base-text
+        // resolution, and link-density chaining below.
+        normalizedTitleToBookId.putAll(buildNormalizedTitleToBookId(titleIndexEntries))
+
         // Versions pass — after all lines exist so ref→lineId joins always land.
         logger.i { "Importing book versions..." }
         val versionsBlacklist = loadVersionsBlacklist(classLoader, logger)
@@ -433,31 +457,41 @@ class SefariaDirectImporter(
             dumpLinkerSidecar(sidecarPath, allRefsWithPath, lineKeyToId)
         }
 
-        // Resolve deferred base_text_titles → bookIds now that every book has been
-        // inserted and normalizedTitleToBookId is fully populated. This gives the
-        // link orientation resolver explicit base→dependant edges instead of the
-        // priorityRank heuristic.
-        if (pendingBaseTextKeysByBookId.isNotEmpty()) {
-            var resolved = 0
-            var unresolved = 0
-            pendingBaseTextKeysByBookId.forEach { (bookId, keys) ->
-                val ids = keys.mapNotNullTo(HashSet()) { normalizedTitleToBookId[it] }
-                resolved += ids.size
-                unresolved += keys.size - ids.size
-                if (ids.isNotEmpty()) {
-                    val meta = bookMetaById[bookId] ?: return@forEach
-                    // Set BOTH baseTextBookIds (for resolver) and the strict
-                    // Sefaria-declared subset (for SOURCE view boost). Subsequent
-                    // inference/density passes will only mutate `baseTextBookIds`.
-                    bookMetaById[bookId] = meta.copy(
-                        baseTextBookIds = ids,
-                        sefariaDeclaredBaseTextBookIds = ids,
-                    )
+        // Resolve deferred base-text keys → bookIds now that every book has been
+        // inserted and normalizedTitleToBookId is fully populated. Declared and
+        // inferred keys are resolved into separate sets: baseTextBookIds (for the
+        // orientation resolver) is their union — preserving existing direction
+        // behavior — while the provenance sets stay disjoint. book_base_text is
+        // written from the DECLARED set only (metadata fidelity, not UI ranking).
+        run {
+            val bookIds = HashSet<Long>().apply {
+                addAll(pendingDeclaredKeysByBookId.keys)
+                addAll(pendingInferredKeysByBookId.keys)
+            }
+            var declaredHits = 0
+            var inferredHits = 0
+            var baseTextRows = 0
+            for (bookId in bookIds) {
+                val declaredIds = pendingDeclaredKeysByBookId[bookId]
+                    ?.mapNotNullTo(HashSet()) { normalizedTitleToBookId[it] } ?: HashSet()
+                val inferredIds = pendingInferredKeysByBookId[bookId]
+                    ?.mapNotNullTo(HashSet()) { normalizedTitleToBookId[it] } ?: HashSet()
+                declaredHits += declaredIds.size
+                inferredHits += inferredIds.size
+                val meta = bookMetaById[bookId] ?: continue
+                bookMetaById[bookId] = meta.copy(
+                    baseTextBookIds = declaredIds + inferredIds,
+                    sefariaDeclaredBaseTextBookIds = declaredIds,
+                    inferredBaseTextBookIds = inferredIds,
+                )
+                for (baseBookId in declaredIds) {
+                    repository.insertBookBaseText(bookId, baseBookId)
+                    baseTextRows++
                 }
             }
             logger.i {
-                "Resolved base_text_titles for ${pendingBaseTextKeysByBookId.size} books " +
-                    "($resolved title→bookId hits, $unresolved misses)"
+                "Resolved base-text keys for ${bookIds.size} books " +
+                    "($declaredHits declared, $inferredHits inferred hits; $baseTextRows book_base_text rows)"
             }
         }
 
@@ -500,6 +534,7 @@ class SefariaDirectImporter(
                 charLevelPending = charLevelPending,
                 refsByPath = refsByPath
             )
+            linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }
 
             // Word-level anchors: resolve the itags embedded in base texts to
@@ -537,6 +572,20 @@ class SefariaDirectImporter(
         logger.i { "Demoting cross-corpus dependant links per Sefaria categorisation..." }
         linksImporter.demoteCrossCorpusDependantLinks()
         linksImporter.updateBookHasLinks()
+
+        // Capture the authoritative post-demotion per-type split. Demotion only
+        // retypes rows (never adds/removes), so Σ persisted must equal Σ insert-
+        // time written — fail loudly if the invariant breaks.
+        linkImportMetrics?.let { inserted ->
+            val persisted = linksImporter.persistedCountsByType()
+            val insertedWrittenSum = inserted.insertedByType.values.sumOf { it.written }
+            val persistedSum = persisted.values.sum()
+            check(insertedWrittenSum == persistedSum) {
+                "Link metrics invariant violated: Σ insertedByType.written=$insertedWrittenSum " +
+                    "!= Σ persistedByType=$persistedSum (demotion only retypes rows, never adds/removes)"
+            }
+            persistedLinkCountsByType = persisted
+        }
 
         // Persist current source hashes for next build's touched-book detection.
         // We only record hashes for books that actually went through the importer
@@ -588,6 +637,42 @@ private fun dumpLinkerSidecar(
                 .append(lineId.toString()).append('\n')
         }
     }
+}
+
+/**
+ * One book's contribution to the title→bookId index, in priority order.
+ * [primaryTitles] are raw titles (heTitle/enTitle, normalized on build);
+ * [aliasKeys] are already-normalized alias variants (titleVariants/heTitleVariants).
+ */
+internal data class BookTitleIndexEntry(
+    val bookId: Long,
+    val primaryTitles: List<String?>,
+    val aliasKeys: List<String>,
+)
+
+/**
+ * Builds the normalized-title → bookId index in TWO GLOBAL PHASES over the
+ * priority-ordered [entries]: first every book's PRIMARY titles, then every
+ * book's alias variants. `putIfAbsent` within each phase keeps the earliest
+ * (highest-priority) claimant; the phase split guarantees a primary title
+ * always wins over any alias, even one from an earlier book. This fixes the
+ * Meilah bug where Mishnah Meilah's alias "meilah" shadowed Talmud Meilah's
+ * primary title, inflating book_base_text rows.
+ */
+internal fun buildNormalizedTitleToBookId(entries: List<BookTitleIndexEntry>): Map<String, Long> {
+    val map = LinkedHashMap<String, Long>()
+    for (entry in entries) {
+        for (title in entry.primaryTitles) {
+            val normalized = normalizeTitleKey(title) ?: continue
+            map.putIfAbsent(normalized, entry.bookId)
+        }
+    }
+    for (entry in entries) {
+        for (alias in entry.aliasKeys) {
+            map.putIfAbsent(alias, entry.bookId)
+        }
+    }
+    return map
 }
 
 /**

@@ -1871,7 +1871,7 @@ class DatabaseGenerator(
         runCatching {
             val dependantTypes = listOf(
                 "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH",
-                "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT",
+                "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT", "ELUCIDATION",
             ).joinToString(",") { "'$it'" }
             repository.executeRawQuery(
                 "UPDATE book SET hasSourceConnection=1 WHERE id IN (" +

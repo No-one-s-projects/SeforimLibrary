@@ -18,6 +18,10 @@ import kotlinx.serialization.Serializable
  * @property pubDates The list of publication dates for this book
  * @property heShortDesc A short description of the book in Hebrew
  * @property heDesc The full (long) description of the book in Hebrew
+ * @property dependenceType Raw case-normalized `dependence` value from the Sefaria schema
+ *                          (e.g. "commentary", "targum"); null for independent books
+ * @property collectiveTitleHe Hebrew collective title from the Sefaria schema (e.g. "רש\"י")
+ * @property collectiveTitleEn English collective title from the Sefaria schema (e.g. "Rashi")
  * @property order The display order of the book within its category
  * @property totalLines The total number of lines in the book
  * @property hasAltStructures Indicates if the book has alternative TOC structures (e.g., Parasha)
@@ -38,6 +42,9 @@ data class Book(
     val pubDates: List<PubDate> = emptyList(),
     val heShortDesc: String? = null,
     val heDesc: String? = null,
+    val dependenceType: String? = null,
+    val collectiveTitleHe: String? = null,
+    val collectiveTitleEn: String? = null,
     // Legacy column, no longer populated: "הערות על <title>" files are imported
     // as standalone books linked via links/*.json.
     val notesContent: String? = null,

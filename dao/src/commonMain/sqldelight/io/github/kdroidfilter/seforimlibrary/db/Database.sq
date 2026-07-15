@@ -28,6 +28,8 @@
 --     book_topic.topicId              -> topic(id)               ON DELETE CASCADE
 --     book_author.bookId              -> book(id)                ON DELETE CASCADE
 --     book_author.authorId            -> author(id)              ON DELETE CASCADE
+--     book_base_text.bookId           -> book(id)                ON DELETE CASCADE
+--     book_base_text.baseBookId       -> book(id)                ON DELETE CASCADE
 --     book_generation.bookId          -> book(id)                ON DELETE CASCADE
 --     book_generation.generationId    -> generation(id)          ON DELETE CASCADE
 --     line.bookId                     -> book(id)                ON DELETE CASCADE
@@ -161,6 +163,13 @@ CREATE TABLE IF NOT EXISTS book (
     hasAltStructures INTEGER NOT NULL DEFAULT 0,
     hasTeamim INTEGER NOT NULL DEFAULT 0,
     hasNekudot INTEGER NOT NULL DEFAULT 0,
+    -- Raw case-normalized dependence from schema: 'Commentary'|'Targum'|'Midrash'|'Guides';
+    -- unknown future value kept verbatim (trim only). isDependant derived = NOT NULL.
+    dependenceType TEXT DEFAULT NULL,
+    -- schema collective_title.he (explicit grouping only; NULL when absent)
+    collectiveTitleHe TEXT DEFAULT NULL,
+    -- schema collective_title.en
+    collectiveTitleEn TEXT DEFAULT NULL,
     FOREIGN KEY (categoryId) REFERENCES category(id) ON DELETE CASCADE,
     FOREIGN KEY (sourceId) REFERENCES source(id) ON DELETE RESTRICT
 );
@@ -218,6 +227,16 @@ CREATE TABLE IF NOT EXISTS book_author (
 
 CREATE INDEX IF NOT EXISTS idx_book_author_book ON book_author(bookId);
 CREATE INDEX IF NOT EXISTS idx_book_author_author ON book_author(authorId);
+
+-- Declared base-text relations (book -> its base book), Sefaria declared only.
+-- Pure junction (PK = both columns): delta upserts are ON CONFLICT DO NOTHING.
+CREATE TABLE IF NOT EXISTS book_base_text (
+    bookId INTEGER NOT NULL REFERENCES book(id) ON DELETE CASCADE,
+    baseBookId INTEGER NOT NULL REFERENCES book(id) ON DELETE CASCADE,
+    PRIMARY KEY (bookId, baseBookId)
+);
+
+CREATE INDEX IF NOT EXISTS idx_book_base_text_base ON book_base_text(baseBookId);
 
 -- Generation (era / period). Seeded from otzaria-library/ForDB/סדר הדורות.csv
 -- by the dedicated :sefariasqlite:seedGenerations task (runs after appendOtzaria
@@ -321,12 +340,10 @@ CREATE TABLE IF NOT EXISTS link (
     targetLineIndex INTEGER NOT NULL,
     targetBookOrderIndex INTEGER NOT NULL,
     connectionTypeId INTEGER NOT NULL,
-    -- 1 when this link's orientation was decided by an explicit Sefaria
-    -- `base_text_titles` match (target.baseTextBookIds contains source).
-    -- 0 for density-chained, priorityRank-fallback, or unoriented links.
-    -- Used to boost Sefaria-declared bases above lateral citations in the
-    -- SOURCE virtual view's ORDER BY clause.
-    isDeclaredBase INTEGER NOT NULL DEFAULT 0,
+    -- Orientation provenance: 0=NONE, 1=INFERRED_TITLE ("X on Y" parse),
+    -- 2=SEFARIA_DECLARED (`base_text_titles`). Boosts declared > inferred >
+    -- lateral citations in the SOURCE virtual view's ORDER BY clause.
+    baseProvenance INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (sourceBookId) REFERENCES book(id) ON DELETE CASCADE,
     FOREIGN KEY (targetBookId) REFERENCES book(id) ON DELETE CASCADE,
     FOREIGN KEY (sourceLineId) REFERENCES line(id) ON DELETE CASCADE,

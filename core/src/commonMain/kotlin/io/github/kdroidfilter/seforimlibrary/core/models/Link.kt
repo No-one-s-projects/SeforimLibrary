@@ -31,18 +31,12 @@ data class Link(
     val targetLineIndex: Int,
     val connectionType: ConnectionType,
     /**
-     * `true` when the orientation of this link was determined by an explicit
-     * Sefaria-declared `base_text_titles` match (i.e. the target book's schema
-     * declares the source book as its base text). `false` for orientations
-     * inferred via density chaining, isBaseBook/priorityRank fallback, or
-     * unoriented types.
-     *
-     * Used by the SOURCE virtual view's ORDER BY to surface Sefaria-declared
-     * bases above lateral citations in books that cite Tanakh extensively
-     * while having a smaller declared base (e.g. Nachalat Avot on Pirkei Avot
-     * where Mishnah Avot has 93 links but Tehillim citations dominate at 371).
+     * Provenance of this link's base→dependant orientation: 0=NONE,
+     * 1=INFERRED_TITLE ("X on Y" title parse), 2=SEFARIA_DECLARED
+     * (`base_text_titles`). Used by the SOURCE virtual view's ORDER BY to
+     * surface declared bases above inferred ones above lateral citations.
      */
-    val isDeclaredBase: Boolean = false,
+    val baseProvenance: Int = 0,
 )
 
 /**
@@ -81,6 +75,16 @@ enum class ConnectionType {
      * view (it is not a base/dependant relation). See LINKER_DELTA_PLAN.md.
      */
     LINKER,
+
+    // Named Sefaria connection types, appended after LINKER to keep ids 1–15 stable.
+    SIFREI_MITZVOT,
+    ESSAY,
+    ALLUSION,
+    LITURGY,
+    ELUCIDATION,
+    EXPLICATION,
+    LAW,
+    SUMMARY,
     ;
 
     companion object {
@@ -91,7 +95,13 @@ enum class ConnectionType {
          * whitespace and underscore/space variations are normalized. Unknown
          * values fall back to [OTHER].
          */
-        fun fromString(value: String): ConnectionType {
+        fun fromString(value: String): ConnectionType = fromKnownStringOrNull(value) ?: OTHER
+
+        /**
+         * Strict variant of [fromString]: returns `null` for unrecognized values
+         * instead of falling back to [OTHER]. Empty/`"none"`/`"other"` map to [OTHER].
+         */
+        fun fromKnownStringOrNull(value: String): ConnectionType? {
             val v = value.trim().lowercase().replace(' ', '_')
             return when (v) {
                 "commentary" -> COMMENTARY
@@ -108,8 +118,16 @@ enum class ConnectionType {
                 "mishnah_in_talmud" -> MISHNAH_IN_TALMUD
                 "related", "related_passage" -> RELATED
                 "linker" -> LINKER
-                "", "none" -> OTHER
-                else -> OTHER
+                "sifrei_mitzvot" -> SIFREI_MITZVOT
+                "essay" -> ESSAY
+                "allusion" -> ALLUSION
+                "liturgy" -> LITURGY
+                "ellucidation", "elucidation" -> ELUCIDATION
+                "explication" -> EXPLICATION
+                "law" -> LAW
+                "summary" -> SUMMARY
+                "", "none", "other" -> OTHER
+                else -> null
             }
         }
     }
