@@ -1,4 +1,4 @@
-# job-מראה לבדיקת חוזה טבלאות ה-patch מול צד ה-Dart (Otzaria/seforim_library_updater).
+# job-מראה לבדיקת חוזה טבלאות ה-patch מול צד ה-Dart (Otzaria/otzaria_library_updater).
 # המאגר ציבורי כרגע ולכן אין צורך ב-token; אם יהפוך לפרטי יש להוסיף
 # ל-checkout שלו `token: ${{ secrets.CONTRACT_REPO_TOKEN }}` ולהגדיר את ה-secret.
 name: contract
@@ -16,10 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout Otzaria/seforim_library_updater (צד ה-Dart)
+      - name: Checkout Otzaria/otzaria_library_updater (צד ה-Dart)
         uses: actions/checkout@v4
         with:
-          repository: Otzaria/seforim_library_updater
+          repository: Otzaria/otzaria_library_updater
           path: seforim-library-updater
 
       # נתיב שגוי חייב להיכשל בקול רם, לא להתדלג בשקט
