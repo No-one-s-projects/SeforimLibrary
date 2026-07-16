@@ -31,16 +31,19 @@ jobs:
 
           # `gh release view` (no args) → the "Latest" release. With no releases
           # (or only pre-releases) the call fails; leave `latest` null.
-          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
+          # Download counters change merely because a client (or the reuse
+          # verifier) reads an asset.  They are monitoring data, not release
+          # identity, so keep them out of the committed immutable manifest.
+          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null | jq -cS 'del(.assets[].downloadCount)'); then
             LATEST_ARG=(--argjson latest "$LATEST_JSON")
           else
             LATEST_ARG=(--argjson latest null)
           fi
 
           # All releases for history ([] when none exist).
-          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
+          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 1000)
 
-          GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          GENERATED_AT=$(jq -r '[.[].publishedAt | select(. != null)] | max // "1970-01-01T00:00:00Z"' <<<"$ALL_RELEASES")
 
           jq -n \
              --arg generatedAt "$GENERATED_AT" \

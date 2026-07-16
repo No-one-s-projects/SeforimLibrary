@@ -1,0 +1,180 @@
+name: Pinned Manual Links Corpus QA
+
+run-name: manual-links-corpus mode=${{ inputs.mode }} otzaria=${{ inputs.otzaria_commit }} sefaria=${{ inputs.sefaria_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'bootstrap for a pre-lineage fixture; refresh for an enriched pinned commit'
+        type: choice
+        options: [refresh, bootstrap]
+        default: refresh
+        required: true
+      otzaria_commit:
+        description: 'Full otzaria-library commit containing the corpus under test'
+        type: string
+        required: true
+      sefaria_tag:
+        description: 'Immutable SefariaExport release tag'
+        type: string
+        required: true
+      sefaria_release_metadata_sha256:
+        description: 'Raw SHA-256 of release_metadata.json'
+        type: string
+        required: true
+      sefaria_archive_sha256:
+        description: 'SHA-256 of the complete Sefaria archive stream'
+        type: string
+        required: true
+      seforim_tool_commit:
+        description: 'Full SeforimLibrary commit containing the updater under test'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-links-corpus-qa
+  cancel-in-progress: false
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MODE: ${{ inputs.mode }}
+      OTZARIA_COMMIT: ${{ inputs.otzaria_commit }}
+      SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+      SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+      SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+      TOOL_COMMIT: ${{ inputs.seforim_tool_commit }}
+      EXPECTED_TARGET_RECORDS: '65397'
+      EXPECTED_SOURCE_RECORDS: '17980'
+      EXPECTED_EXCLUDED_RECORDS: '174'
+      EXPECTED_ANCHORS: '17980'
+    steps:
+      - name: Validate immutable inputs
+        run: |
+          set -euo pipefail
+          [[ "$MODE" == refresh || "$MODE" == bootstrap ]]
+          [[ "$OTZARIA_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TOOL_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SEFARIA_METADATA_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SEFARIA_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+
+      - name: Checkout the exact updater
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.seforim_tool_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout the exact Otzaria corpus
+        uses: actions/checkout@v4
+        with:
+          repository: Otzaria/otzaria-library
+          ref: ${{ inputs.otzaria_commit }}
+          path: otzaria-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Preflight full-corpus capacity
+        run: |
+          set -euo pipefail
+          DISK_AVAILABLE_KIB=$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')
+          MEM_AVAILABLE_KIB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          [[ "$DISK_AVAILABLE_KIB" =~ ^[0-9]+$ ]]
+          [[ "$MEM_AVAILABLE_KIB" =~ ^[0-9]+$ ]]
+          echo "Corpus workspace disk available: $((DISK_AVAILABLE_KIB / 1024 / 1024)) GiB"
+          echo "MemAvailable: $((MEM_AVAILABLE_KIB / 1024 / 1024)) GiB"
+          if (( DISK_AVAILABLE_KIB < 12582912 )); then
+            echo "::error::Full-corpus QA requires at least 12 GiB free disk before extraction."
+            exit 1
+          fi
+          if (( MEM_AVAILABLE_KIB < 6291456 )); then
+            echo "::error::Full-corpus QA requires at least 6 GiB MemAvailable."
+            exit 1
+          fi
+
+      - name: Download and verify the exact Sefaria export
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TOOL_COMMIT"
+          test "$(git -C otzaria-source rev-parse HEAD)" = "$OTZARIA_COMMIT"
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          INPUTS="$RUNNER_TEMP/manual-links-corpus-inputs"
+          rm -rf "$INPUTS"
+          mkdir -p "$INPUTS/assets" "$INPUTS/export"
+          gh release download "$SEFARIA_TAG" -R Otzaria/SefariaExport \
+            --pattern release_metadata.json --dir "$INPUTS/assets"
+          METADATA="$INPUTS/assets/release_metadata.json"
+          echo "$SEFARIA_METADATA_SHA  $METADATA" | sha256sum -c -
+          python3 .github/scripts/validate-sefaria-release-metadata.py \
+            "$METADATA" "$SEFARIA_TAG" "$SEFARIA_ARCHIVE_SHA"
+          : > "$INPUTS/archive.tar.zst"
+          while IFS=$'\t' read -r name size sha; do
+            gh release download "$SEFARIA_TAG" -R Otzaria/SefariaExport \
+              --pattern "$name" --dir "$INPUTS/assets"
+            test "$(stat -c %s "$INPUTS/assets/$name")" = "$size"
+            echo "$sha  $INPUTS/assets/$name" | sha256sum -c -
+            cat "$INPUTS/assets/$name" >> "$INPUTS/archive.tar.zst"
+          done < <(jq -r '.archive.parts[] | [.name, (.size|tostring), .sha256] | @tsv' "$METADATA")
+          test "$(stat -c %s "$INPUTS/archive.tar.zst")" = "$(jq -r .archive.size "$METADATA")"
+          echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/archive.tar.zst" | sha256sum -c -
+          tar --use-compress-program=unzstd -xf "$INPUTS/archive.tar.zst" -C "$INPUTS/export"
+          mapfile -t DATABASE_EXPORTS < <(find "$INPUTS/export" -type d -name database_export -print | sort)
+          test "${#DATABASE_EXPORTS[@]}" -eq 1
+          dirname "${DATABASE_EXPORTS[0]}" > "$INPUTS/export-root.txt"
+
+      - name: Run the immutable full-corpus gate
+        run: |
+          set -euo pipefail
+          INPUTS="$RUNNER_TEMP/manual-links-corpus-inputs"
+          OUTPUT="$RUNNER_TEMP/manual-links-corpus-output"
+          rm -rf "$OUTPUT"
+          EXTRA_ARGS=()
+          if [[ "$MODE" == refresh ]]; then
+            test -f otzaria-source/manual_links_lineage.json
+            mkdir -p "$INPUTS/empty-changelog"
+            EXTRA_ARGS+=(
+              -PmanualLinksLineage="$GITHUB_WORKSPACE/otzaria-source/manual_links_lineage.json"
+              -PsefariaChangelogDir="$INPUTS/empty-changelog"
+            )
+          fi
+          ./gradlew :sefariasqlite:manualLinksCorpusTest --no-daemon --max-workers=2 \
+            -PmanualLinksMode="$MODE" \
+            -PmanualLinksRepo="$GITHUB_WORKSPACE/otzaria-source" \
+            -PmanualLinksConfig="$GITHUB_WORKSPACE/otzaria-source/manual_links_sync.json" \
+            -PsefariaExport="$(cat "$INPUTS/export-root.txt")" \
+            -PsefariaReleaseMetadata="$INPUTS/assets/release_metadata.json" \
+            -PsefariaReleaseMetadataSha256="$SEFARIA_METADATA_SHA" \
+            -PseforimToolCommit="$TOOL_COMMIT" \
+            -PmanualLinksOutput="$OUTPUT" \
+            -PexpectedTargetSefariaRecords="$EXPECTED_TARGET_RECORDS" \
+            -PexpectedSourceSefariaRecords="$EXPECTED_SOURCE_RECORDS" \
+            -PexpectedExcludedRecords="$EXPECTED_EXCLUDED_RECORDS" \
+            -PexpectedAnchors="$EXPECTED_ANCHORS" \
+            "${EXTRA_ARGS[@]}"
+          jq -e '.refs.missing == 0 and .refs.duplicate == 0 and .anchors.drifted == 0 and .packaging_collisions == 0' \
+            "$OUTPUT/manual_links_refresh_report.json" >/dev/null
+          mkdir -p corpus-result
+          cp "$OUTPUT/manual_links_refresh_report.json" "$OUTPUT/manual_links_lineage.json" \
+            "$OUTPUT/.manual-links-refresh-complete" corpus-result/
+
+      - name: Upload the output-only corpus evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-links-corpus-result
+          path: corpus-result/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
