@@ -12,8 +12,16 @@
   הספציפיים לאוצריא. כך בהיסטוריה של `otzaria` **רואים בבירור איפה כל ענף מתחיל ונגמר**:
 
 ```
-*   … קומיטי-אוצריא עליונים (cascade-tooling / manifest) …   ← ראש otzaria
-*   Merge branch 'feat/sefaria-dependence-linktypes' into otzaria   ← בועת הפיצ'ר החדש
+*   … קומיטי-אוצריא עליונים (cascade-tooling / manifest / docs) …   ← ראש otzaria
+*   Merge branch 'feat/manual-links-repair' into otzaria       ← בועה מבוססת-תשתית
+|\
+| * automate manual link repair — ManualLinks* + workflows + QA  (1 קומיט)
+|/
+*   Merge branch 'feat/category-descriptions' into otzaria      ← בועת מטאדאטה (על סכמה 2)
+|\
+| * import & persist category descriptions (heShortDesc/heDesc)  (1 קומיט)
+|/
+*   Merge branch 'feat/sefaria-dependence-linktypes' into otzaria   ← בועת סכמה-2
 |\
 | * schema v2 (תלות) + ConnectionType + ייבוא declared/inferred + שכבת QA/CI  (27 קומיטים)
 |/
@@ -52,12 +60,16 @@
 > כמו "rebase & merge" בגיטהאב). ענפי הפיצ'ר עצמם (`fix/*`, `perf`, `word-level`,
 > `ranged`, `hearot`, `otzaria-ranged`) נשארים **טהורים ולינאריים** — מוכנים ל-PR ל-upstream.
 >
-> **חריג — בועות מבוססות-תשתית (`linker`, `feat/sefaria-dependence-linktypes`):**
-> בניגוד ליתר הענפים, שתי בועות אלו **אינן** פיצ'רים טהורים מעל `default_commentators`.
-> הן מבוססות על **שכבת-התשתית של אוצריא** (משנות את `manual-generate-release.yml`
-> וצינור-הרליס), ולכן יושבות **מעל שכבת-התשתית** בראש `otzaria` — `linker` ראשונה,
-> ומעליה בועת `feat/sefaria-dependence-linktypes` — ולא בין שאר בועות-הפיצ'ר. מעל
-> שתיהן מונחים קומיטי-המטא העליונים (cascade-tooling / manifest). `otzaria` נשארת הענף העליון.
+> **חריג — שכבת-הבועות העליונה (מעל שכבת-התשתית של אוצריא):**
+> ארבע בועות אלו **אינן** פיצ'רים טהורים מעל `default_commentators`, אלא מבוססות על
+> **שכבת-התשתית של אוצריא**, ולכן יושבות **מעליה** בראש `otzaria` — בסדר מלמטה למעלה:
+> `linker` → `feat/sefaria-dependence-linktypes` → `feat/category-descriptions` →
+> `feat/manual-links-repair`. שלוש מהן (`linker`, `feat/sefaria-dependence-linktypes`,
+> `feat/manual-links-repair`) **מבוססות-תשתית** — משנות את `manual-generate-release.yml`
+> וצינור-הרליס. `feat/category-descriptions` היא פיצ'ר-מטאדאטה שנשען על שכבת **סכמה 2**
+> (חולק קבצי-ייבוא/DAO עם `feat/sefaria-dependence-linktypes`), ולכן אינו רבייס נקי לבסיס.
+> מעל כל הבועות מונחים קומיטי-המטא העליונים (cascade-tooling / manifest / docs).
+> `otzaria` נשארת הענף העליון.
 
 ---
 
@@ -79,9 +91,10 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
                                           │
                                           ▼   (כל פיצ'ר → בועת merge)
                                        otzaria  = בועות הפיצ'רים + קומיטי-תשתית
-                                          │      + בועות linker & sefaria-dependence + קומיטי-מטא בראש
+                                          │      + שכבת-הבועות העליונה + קומיטי-מטא בראש
                                           ▼
-                    linker (9) → feat/sefaria-dependence-linktypes (27)   [בועות מעל תשתית-אוצריא]
+     linker (9) → feat/sefaria-dependence-linktypes (27) → feat/category-descriptions (1)
+                → feat/manual-links-repair (1)             [שכבת-הבועות מעל תשתית-אוצריא]
                                           └───────────── merge --no-ff ────────┘
 ```
 
@@ -104,6 +117,8 @@ fix/category-ids-full-path → fix/book-corpus-talmud → perf/faster-generation
 | — | `otzaria` | (merge של כולם) | 12 (+manifest) | קומיטים ספציפיים לאוצריא |
 | 13 | `linker` | תשתית-אוצריא (מעל, ב-`otzaria`) | 9 | לינקר: DumpLines + source-hash + Phase-2 + הקשחה + patch-gate + ניקוי-דיסק |
 | 14 | `feat/sefaria-dependence-linktypes` | תשתית-אוצריא (מעל `linker`) | 27 | ייבוא תלות (isDependant) + ConnectionType + סכמה 2 + book_base_text + שכבת QA/CI |
+| 15 | `feat/category-descriptions` | סכמה-2 (מעל `feat/sefaria-dependence-linktypes`) | 1 | ייבוא והתמדת תיאורי-קטגוריה (`heShortDesc`/`heDesc`) בטבלת `category` |
+| 16 | `feat/manual-links-repair` | תשתית-אוצריא (מעל `feat/category-descriptions`) | 1 | אוטומציית תיקון קישורים ידניים — `ManualLinks*` + workflows + QA-corpus |
 
 ---
 
@@ -186,7 +201,9 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
 והפיכות מ-upstream: `התאמה לאוצריא`, `delta-updater לא סביב Lucene`, `ביטול catalog.pb`,
 `ביטול bundle`, `otzaria כראשי`, `manifest כשאין releases`, `הורדת ספריית אוצריא בלבד`,
 `אי-אריזת מודל ההטמעה`, `שינויי מיקומים → תת-קטגוריה`, החרגת/התרת "תא שמע", ועריכת
-`books_blacklist`. מעל קומיטי-אוצריא — קומיטי manifest של ה-CI, ובראש הכל **בועת `linker`**.
+`books_blacklist`. מעל קומיטי-תשתית-אוצריא מונחת **שכבת-הבועות העליונה** (מלמטה למעלה:
+`linker` → `feat/sefaria-dependence-linktypes` → `feat/category-descriptions` →
+`feat/manual-links-repair`), ומעליהן קומיטי-המטא של ה-CI/תיעוד (manifest / cascade-tooling / docs) בראש.
 
 ### 13. `linker` — בועה מבוססת-תשתית
 תמיכת ה-**לינקר** (Sefaria linker → קישורי-LINKER ב-DB). תשעה קומיטים המבוססים על
@@ -243,6 +260,30 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
 > טסטים: `ConnectionTypeTest`, `SeforimRepositoryIntegrationTest`, `PatchTablesContractTest`,
 > `ResolveSchemaVersionTest`, `SefariaLink*Test`, `CrossCorpusDemotionTest`, `scripts/qa/tests`.
 > תיעוד: `SEFARIA_METADATA_IMPORT_PLAN.md`, `DELTA_UPDATE_WORKFLOW.md`.
+
+### 15. `feat/category-descriptions` — בועת מטאדאטה (מעל סכמה 2)
+מימוש **תוכנית תיאורי-הקטגוריות** ([`CATEGORY_DESCRIPTIONS_PLAN.md`](CATEGORY_DESCRIPTIONS_PLAN.md)):
+ייבוא והתמדה של תיאורי-קטגוריה מ-Sefaria. קומיט אחד המבוסס על בועת `feat/sefaria-dependence-linktypes`:
+- **סכמה:** עמודות `heShortDesc`/`heDesc` (nullable) בטבלת `category` (`Database.sq`, `CategoryQueries.sq`),
+  שכבת מודל/DAO (`Category.kt`, `ModelExtensions.kt`, `SeforimRepository.kt`).
+- **ייבוא:** קליטת התיאורים ב-`SeedAllMetadataPostProcess`/`RenameCategoriesPostProcess`, נרמול נתיב
+  (`CategoryPathNormalization.kt`), וסדר-ייבוא (`SefariaImportOrdering.kt`/`SefariaDirectImporter.kt`).
+> **מדוע כאן ולא כפיצ'ר טהור:** חולק 8 קבצי-ייבוא/DAO עם `feat/sefaria-dependence-linktypes`
+> (בהם `SefariaDirectImporter`, `SeedAllMetadataPostProcess`, `SeforimRepository`, `Database.sq`),
+> ולכן נשען על שכבת סכמה-2 ואינו רבייס נקי ל-`default_commentators`.
+> טסטים: `CategoryDescriptionOverridesTest`, `RenameCategoryDescriptionsTest`, `SefariaTableOfContentsMetadataTest`.
+
+### 16. `feat/manual-links-repair` — בועה מבוססת-תשתית (מעל `feat/category-descriptions`)
+מימוש **תוכנית תיקון-הקישורים הידניים** ([`MANUAL_LINKS_REPAIR_PLAN.md`](MANUAL_LINKS_REPAIR_PLAN.md)):
+אוטומציה לרענון/תיקון קישורים ידניים מול קורפוס-ספריא. קומיט אחד המבוסס על בועת `feat/category-descriptions`
+(משנה את `manual-generate-release.yml` ועוד workflows — ולכן בועה מבוססת-תשתית):
+- **ליבת `manuallinks/`:** `ManualLinksRefresh`/`ManualLinksConfig`/`ManualLinksJson`/`ManualLinksLineage`/
+  `ManualLinksChangelog`/`ManualLinksTreeHash`/`SefariaCorpusIndex` + entrypoints (`RefreshManualLinksMain`,
+  `ManualLinksCorpusMain`), וקריאת payload (`SefariaBookPayloadReader`).
+- **CI/תשתית:** `manual-generate-release.yml`, `manual-links-corpus-qa.yml`, `update-release-manifest.yml`,
+  סקריפט `validate-sefaria-release-metadata.py`, ו-`build.gradle.kts`/`libs.versions.toml`.
+> טסטים: `ManualLinks*Test`, `SefariaCorpusIndexTest`, `ManualGenerateReleaseWorkflowContractTest`.
+> תיעוד: `MANUAL_LINKS_REPAIR_PLAN.md`.
 
 ---
 
