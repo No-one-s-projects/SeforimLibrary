@@ -20,6 +20,7 @@ zstd-jni = "1.5.7-7"
 jsoup = "1.22.1"
 slf4j = "2.0.17"
 sqlite-jdbc = "3.50.3.0"
+jackson = "2.19.2"
 
 [libraries]
 
@@ -48,6 +49,8 @@ androidx-activityCompose = { module = "androidx.activity:activity-compose", vers
 jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite-jdbc" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "compose" }
 
 [plugins]

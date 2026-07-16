@@ -286,6 +286,10 @@ tasks.register<JavaExec>("generateHavroutaLinks") {
     }
     args(defaultDbPath)
 
+    if (project.hasProperty("sourceDir")) {
+        systemProperty("sourceDir", project.property("sourceDir") as String)
+    }
+
     // Bumped from 4g → 10g: the IdAllocator now loads a fully populated
     // id_lookup (author/topic/pub_place/pub_date/toc_text) on top of the
     // existing book/line/tocEntry/link tables, and 4g started OOM-ing

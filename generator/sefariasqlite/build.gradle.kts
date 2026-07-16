@@ -33,8 +33,58 @@ kotlin {
             implementation(libs.sqlDelight.driver.sqlite)
             implementation(libs.commons.compress)
             implementation(libs.zstd)
+            implementation(libs.jackson.core)
+            implementation(libs.jackson.databind)
         }
     }
+}
+
+tasks.register<JavaExec>("refreshManualLinks") {
+    group = "application"
+    description = "Refresh manual Otzaria link indices from stable Sefaria refs."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.manuallinks.RefreshManualLinksMainKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    val properties = listOf(
+        "manualLinksMode",
+        "manualLinksRepo",
+        "manualLinksConfig",
+        "manualLinksLineage",
+        "expectedOldConfigSha256",
+        "expectedOldToolCommit",
+        "sefariaExport",
+        "sefariaReleaseMetadata",
+        "sefariaReleaseMetadataSha256",
+        "sefariaChangelogDir",
+        "seforimToolCommit",
+        "manualLinksOutput",
+    )
+    properties.forEach { name ->
+        if (project.hasProperty(name)) systemProperty(name, project.property(name) as String)
+    }
+
+    jvmArgs = listOf("-Xmx4g", "-XX:+UseG1GC")
+}
+
+tasks.register<JavaExec>("manualLinksCorpusTest") {
+    group = "verification"
+    description = "Run the pinned full-corpus manual-links gate with explicit expected counts."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.manuallinks.ManualLinksCorpusMainKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val properties = listOf(
+        "manualLinksMode", "manualLinksRepo", "manualLinksConfig", "manualLinksLineage",
+        "expectedOldConfigSha256", "expectedOldToolCommit", "sefariaExport",
+        "sefariaReleaseMetadata", "sefariaReleaseMetadataSha256", "sefariaChangelogDir",
+        "seforimToolCommit", "manualLinksOutput", "expectedTargetSefariaRecords",
+        "expectedSourceSefariaRecords", "expectedExcludedRecords", "expectedAnchors",
+    )
+    properties.forEach { name ->
+        if (project.hasProperty(name)) systemProperty(name, project.property(name) as String)
+    }
+    jvmArgs = listOf("-Xmx4g", "-XX:+UseG1GC")
 }
 
 tasks.register<JavaExec>("generateSefariaSqlite") {

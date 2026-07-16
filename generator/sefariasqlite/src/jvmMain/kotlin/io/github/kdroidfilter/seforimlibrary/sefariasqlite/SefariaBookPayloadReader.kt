@@ -1,6 +1,8 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
+import com.fasterxml.jackson.core.JsonFactory
+import com.fasterxml.jackson.core.JsonToken
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -30,6 +32,11 @@ internal class SefariaBookPayloadReader(
     private val json: Json,
     private val logger: Logger
 ) {
+    internal data class SelectedBookReadStats(
+        val mergedFilesScanned: Int,
+        val payloadsLoaded: Int,
+    )
+
     fun buildSchemaLookup(schemaDir: Path): Map<String, Path> {
         val lookup = ConcurrentHashMap<String, Path>()
         Files.newDirectoryStream(schemaDir) { it.fileName.toString().endsWith(".json") }.use { ds ->
@@ -75,7 +82,71 @@ internal class SefariaBookPayloadReader(
         }.awaitAll().filterNotNull()
     }
 
-    private fun parseBookFile(
+    /**
+     * Streams only top-level titles for all merged files and materializes
+     * candidate payloads one at a time. Payload construction remains identical
+     * to the regular importer, while unrelated book text never enters memory.
+     */
+    internal fun readSelectedBooks(
+        jsonDir: Path,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+        candidatePrimaryHeTitles: Set<String>,
+        consume: (BookPayload) -> Unit,
+    ): SelectedBookReadStats {
+        var scanned = 0
+        var loaded = 0
+        val mergedFiles = Files.walk(jsonDir).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
+                .sorted()
+                .toList()
+        }
+        for (textPath in mergedFiles) {
+            scanned++
+            val header = readTopLevelTitles(textPath)
+            val schemaPath = resolveSchemaPath(
+                title = header.first,
+                heTitle = header.second,
+                folderName = textPath.parent?.fileName?.name,
+                schemaDir = schemaDir,
+                lookup = schemaLookup,
+            ) ?: continue
+            val schemaHeader = readSchemaTitles(schemaPath)
+            if (sequenceOf(header.second, schemaHeader.second).filterNotNull()
+                    .none { it in candidatePrimaryHeTitles }
+            ) continue
+            parseBookFile(textPath, schemaDir, schemaLookup)?.let {
+                loaded++
+                consume(it)
+            }
+        }
+        return SelectedBookReadStats(scanned, loaded)
+    }
+
+    private fun readTopLevelTitles(path: Path): Pair<String?, String?> {
+        var title: String? = null
+        var heTitle: String? = null
+        JsonFactory().createParser(path.toFile()).use { parser ->
+            require(parser.nextToken() == JsonToken.START_OBJECT) { "Expected object in $path" }
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                require(parser.currentToken == JsonToken.FIELD_NAME) { "Expected field in $path" }
+                val name = parser.currentName
+                val token = parser.nextToken()
+                if (token == JsonToken.VALUE_STRING && name == "title") title = parser.text
+                if (token == JsonToken.VALUE_STRING && name == "heTitle") heTitle = parser.text
+                parser.skipChildren()
+            }
+        }
+        return title to heTitle
+    }
+
+    private fun readSchemaTitles(path: Path): Pair<String?, String?> {
+        val root = json.parseToJsonElement(path.readText()).jsonObject
+        val schema = root["schema"]?.jsonObject ?: return null to null
+        return schema["title"]?.stringOrNull() to schema["heTitle"]?.stringOrNull()
+    }
+
+    internal fun parseBookFile(
         textPath: Path,
         schemaDir: Path,
         schemaLookup: Map<String, Path>

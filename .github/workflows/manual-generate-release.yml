@@ -1,7 +1,8 @@
 name: Manual Generate + Pre-Release
+run-name: manual-generate-release correlation=${{ inputs.correlation_id }}
 
-# End-to-end build pipeline: builds seforim.db from the latest Sefaria +
-# Otzaria sources, runs the LinkerToOtzaria relink serially against this
+# End-to-end build pipeline: builds seforim.db from immutable, digest-pinned
+# Sefaria + Otzaria releases, runs the LinkerToOtzaria relink against this
 # build's own lines snapshot and injects the resulting LINKER links, then
 # packages a split bundle and publishes the lot as a GitHub pre-release.
 # Serial by design: the release always ships a complete link set; a linker
@@ -36,6 +37,42 @@ on:
         type: boolean
         required: false
         default: true
+      source_commit:
+        description: 'Full SeforimLibrary commit selected by the manual-links sync'
+        type: string
+        required: true
+      sefaria_tag:
+        description: 'Immutable SefariaExport release tag'
+        type: string
+        required: true
+      sefaria_release_metadata_sha256:
+        description: 'Raw SHA-256 of release_metadata.json'
+        type: string
+        required: true
+      sefaria_archive_sha256:
+        description: 'SHA-256 of the complete Sefaria archive stream'
+        type: string
+        required: true
+      otzaria_tag:
+        description: 'Immutable otzaria-library release tag'
+        type: string
+        required: true
+      otzaria_asset_sha256:
+        description: 'Raw SHA-256 of the Otzaria ZIP asset'
+        type: string
+        required: true
+      expected_links_commit:
+        description: 'otzaria-library commit containing refreshed links'
+        type: string
+        required: true
+      otzaria_target_commit:
+        description: 'Commit the Otzaria release tag must target'
+        type: string
+        required: true
+      correlation_id:
+        description: 'Exact parent pipeline correlation id'
+        type: string
+        required: true
 
 permissions:
   contents: write
@@ -49,8 +86,110 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  reconcile:
+    name: Reuse a complete build with identical pinned inputs
+    runs-on: ubuntu-latest
+    outputs:
+      reuse: ${{ steps.lookup.outputs.reuse }}
+      release_tag: ${{ steps.lookup.outputs.release_tag }}
+      build_provenance_sha256: ${{ steps.lookup.outputs.build_provenance_sha256 }}
+      lineage_sha256: ${{ steps.lookup.outputs.lineage_sha256 }}
+      config_sha256: ${{ steps.lookup.outputs.config_sha256 }}
+      source_links_tree_sha256: ${{ steps.lookup.outputs.source_links_tree_sha256 }}
+      packaged_links_tree_sha256: ${{ steps.lookup.outputs.packaged_links_tree_sha256 }}
+      assets_json: ${{ steps.lookup.outputs.assets_json }}
+    steps:
+      - name: Find and verify exact provenance
+        id: lookup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+          OTZARIA_TAG: ${{ inputs.otzaria_tag }}
+          OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
+          EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
+          OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/provenance-scan"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -s 'add' > "$RUNNER_TEMP/releases.json"
+          MATCHES=0
+          MATCH_TAG=""
+          MATCH_SHA=""
+          MATCH_CONFIG_SHA=""
+          MATCH_LINEAGE_SHA=""
+          MATCH_SOURCE_TREE_SHA=""
+          MATCH_PACKAGED_TREE_SHA=""
+          MATCH_ASSETS=""
+          while IFS=$'\t' read -r release_id tag draft target provenance_id; do
+            if [ "$draft" = true ] && [ "$target" = "$SOURCE_COMMIT" ]; then
+              echo "::error::Draft/partial release $tag already targets this source commit; recovery requires completing or deleting that draft explicitly."
+              exit 1
+            fi
+            [ "$provenance_id" != "NONE" ] || continue
+            file="$RUNNER_TEMP/provenance-scan/$release_id.json"
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$provenance_id" > "$file"
+            if jq -e \
+              --arg source "$SOURCE_COMMIT" \
+              --arg st "$SEFARIA_TAG" --arg sm "$SEFARIA_METADATA_SHA" --arg sa "$SEFARIA_ARCHIVE_SHA" \
+              --arg ot "$OTZARIA_TAG" --arg oa "$OTZARIA_ASSET_SHA" \
+              --arg ec "$EXPECTED_LINKS_COMMIT" --arg tc "$OTZARIA_TARGET_COMMIT" \
+              '.source_commit==$source and .sefaria_tag==$st and .sefaria_release_metadata_sha256==$sm and
+               .sefaria_archive_sha256==$sa and .otzaria_tag==$ot and .otzaria_asset_sha256==$oa and
+               .expected_links_commit==$ec and .otzaria_target_commit==$tc' "$file" >/dev/null; then
+              test "$draft" = false
+              test "$target" = "$SOURCE_COMMIT"
+              # GitHub exposes sha256 digests for uploaded release assets. Every
+              # payload declared by provenance must exist exactly once and match.
+              while IFS=$'\t' read -r name size sha; do
+                COUNT=$(jq --argjson id "$release_id" --arg name "$name" '[.[]|select(.id==$id)|.assets[]|select(.name==$name)]|length' "$RUNNER_TEMP/releases.json")
+                test "$COUNT" -eq 1
+                REMOTE_SIZE=$(jq -r --argjson id "$release_id" --arg name "$name" '.[]|select(.id==$id)|.assets[]|select(.name==$name)|.size' "$RUNNER_TEMP/releases.json")
+                REMOTE_DIGEST=$(jq -r --argjson id "$release_id" --arg name "$name" '.[]|select(.id==$id)|.assets[]|select(.name==$name)|.digest' "$RUNNER_TEMP/releases.json")
+                test "$REMOTE_SIZE" = "$size"
+                test "$REMOTE_DIGEST" = "sha256:$sha"
+              done < <(jq -r '.assets[]|[.name,(.size|tostring),.sha256]|@tsv' "$file")
+              PROVENANCE_SIZE=$(stat -c %s "$file")
+              PROVENANCE_SHA=$(sha256sum "$file" | cut -d' ' -f1)
+              REMOTE_PROVENANCE_SIZE=$(jq -r --argjson id "$release_id" '.[]|select(.id==$id)|.assets[]|select(.name=="build_provenance.json")|.size' "$RUNNER_TEMP/releases.json")
+              REMOTE_PROVENANCE_DIGEST=$(jq -r --argjson id "$release_id" '.[]|select(.id==$id)|.assets[]|select(.name=="build_provenance.json")|.digest' "$RUNNER_TEMP/releases.json")
+              test "$REMOTE_PROVENANCE_SIZE" = "$PROVENANCE_SIZE"
+              test "$REMOTE_PROVENANCE_DIGEST" = "sha256:$PROVENANCE_SHA"
+              REMOTE_ASSET_COUNT=$(jq --argjson id "$release_id" '.[]|select(.id==$id)|.assets|length' "$RUNNER_TEMP/releases.json")
+              EXPECTED_ASSET_COUNT=$(jq '.assets|length + 1' "$file")
+              test "$REMOTE_ASSET_COUNT" -eq "$EXPECTED_ASSET_COUNT"
+              MATCHES=$((MATCHES+1))
+              MATCH_TAG="$tag"
+              MATCH_SHA="$PROVENANCE_SHA"
+              MATCH_CONFIG_SHA=$(jq -r .config_sha256 "$file")
+              MATCH_LINEAGE_SHA=$(jq -r .lineage_sha256 "$file")
+              MATCH_SOURCE_TREE_SHA=$(jq -r .source_links_tree_sha256 "$file")
+              MATCH_PACKAGED_TREE_SHA=$(jq -r .packaged_links_tree_sha256 "$file")
+              MATCH_ASSETS=$(jq -cS \
+                --arg name build_provenance.json --argjson size "$PROVENANCE_SIZE" --arg sha "$PROVENANCE_SHA" \
+                '.assets + [{name:$name,size:$size,sha256:$sha}] | sort_by(.name)' "$file")
+            fi
+          done < <(jq -r '.[] | [.id,.tag_name,.draft,.target_commitish,([.assets[]|select(.name=="build_provenance.json")|.id][0]//"NONE")] | @tsv' "$RUNNER_TEMP/releases.json")
+          test "$MATCHES" -le 1 || { echo "::error::Multiple complete releases have identical input provenance"; exit 1; }
+          if [ "$MATCHES" -eq 1 ]; then
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$MATCH_TAG" >> "$GITHUB_OUTPUT"
+            echo "build_provenance_sha256=$MATCH_SHA" >> "$GITHUB_OUTPUT"
+            echo "lineage_sha256=$MATCH_LINEAGE_SHA" >> "$GITHUB_OUTPUT"
+            echo "config_sha256=$MATCH_CONFIG_SHA" >> "$GITHUB_OUTPUT"
+            echo "source_links_tree_sha256=$MATCH_SOURCE_TREE_SHA" >> "$GITHUB_OUTPUT"
+            echo "packaged_links_tree_sha256=$MATCH_PACKAGED_TREE_SHA" >> "$GITHUB_OUTPUT"
+            echo "assets_json=$MATCH_ASSETS" >> "$GITHUB_OUTPUT"
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-and-release:
     name: Build seforim.db + bundle + delta fan, publish pre-release
+    needs: reconcile
+    if: needs.reconcile.outputs.reuse != 'true'
     runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
     timeout-minutes: 360
     env:
@@ -77,7 +216,10 @@ jobs:
       - name: Checkout SeforimLibrary
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_commit }}
           submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Disk before build
         run: df -h
@@ -158,6 +300,124 @@ jobs:
       - name: Install DB workflow dependencies
         run: bash .github/scripts/install-db-workflow-deps.sh
 
+      # Resolve both source archives by immutable tag and digest before any DB
+      # work. No fetcher in the build is allowed to consult /releases/latest.
+      - name: Verify pinned lineage and extract exact inputs
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+          OTZARIA_TAG: ${{ inputs.otzaria_tag }}
+          OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
+          EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
+          OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN is required for pinned cross-repo downloads"; exit 1; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_LINKS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OTZARIA_TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SEFARIA_METADATA_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SEFARIA_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$OTZARIA_ASSET_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CORRELATION_ID" =~ ^sefaria:[0-9]+:[0-9]+:[^:]+:[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git fetch --no-tags origin refs/heads/otzaria:refs/remotes/origin/otzaria
+          git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/otzaria
+          test "$EXPECTED_LINKS_COMMIT" = "$OTZARIA_TARGET_COMMIT"
+
+          INPUTS="$RUNNER_TEMP/manual-links-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "$INPUTS"
+          mkdir -p "$INPUTS/sefaria-assets" "$INPUTS/sefaria-extract" "$INPUTS/otzaria-assets" "$INPUTS/otzaria-extract"
+
+          gh release download "$SEFARIA_TAG" -R Otzaria/SefariaExport \
+            --pattern release_metadata.json --dir "$INPUTS/sefaria-assets"
+          SEFARIA_METADATA="$INPUTS/sefaria-assets/release_metadata.json"
+          echo "$SEFARIA_METADATA_SHA  $SEFARIA_METADATA" | sha256sum -c -
+          python3 .github/scripts/validate-sefaria-release-metadata.py \
+            "$SEFARIA_METADATA" "$SEFARIA_TAG" "$SEFARIA_ARCHIVE_SHA"
+          : > "$INPUTS/sefaria-archive.tar.zst"
+          while IFS=$'\t' read -r name size sha; do
+            test "$(basename "$name")" = "$name"
+            gh release download "$SEFARIA_TAG" -R Otzaria/SefariaExport \
+              --pattern "$name" --dir "$INPUTS/sefaria-assets"
+            test "$(stat -c %s "$INPUTS/sefaria-assets/$name")" = "$size"
+            echo "$sha  $INPUTS/sefaria-assets/$name" | sha256sum -c -
+            cat "$INPUTS/sefaria-assets/$name" >> "$INPUTS/sefaria-archive.tar.zst"
+          done < <(jq -r '.archive.parts[] | [.name, (.size|tostring), .sha256] | @tsv' "$SEFARIA_METADATA")
+          test "$(stat -c %s "$INPUTS/sefaria-archive.tar.zst")" = "$(jq -r .archive.size "$SEFARIA_METADATA")"
+          echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -
+          tar --use-compress-program=unzstd -xf "$INPUTS/sefaria-archive.tar.zst" -C "$INPUTS/sefaria-extract"
+          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name database_export -print | sort)
+          test "${#SEFARIA_DB_ROOTS[@]}" -eq 1
+          SEFARIA_DB_ROOT="${SEFARIA_DB_ROOTS[0]}"
+          test -d "$SEFARIA_DB_ROOT/json" && test -d "$SEFARIA_DB_ROOT/schemas"
+          SEFARIA_EXTRACT_ROOT=$(dirname "$SEFARIA_DB_ROOT")
+
+          gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
+            --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
+          PROVENANCE="$INPUTS/otzaria-assets/otzaria_release_provenance.json"
+          test "$(jq -r .target_commit "$PROVENANCE")" = "$EXPECTED_LINKS_COMMIT"
+          test "$(jq -r .asset.sha256 "$PROVENANCE")" = "$OTZARIA_ASSET_SHA"
+          OTZARIA_ASSET_NAME=$(jq -r .asset.name "$PROVENANCE")
+          test "$(basename "$OTZARIA_ASSET_NAME")" = "$OTZARIA_ASSET_NAME"
+          RELEASE_TARGET=$(gh release view "$OTZARIA_TAG" -R otzaria/otzaria-library --json targetCommitish -q .targetCommitish)
+          test "$RELEASE_TARGET" = "$OTZARIA_TARGET_COMMIT"
+          OTZARIA_TAG_COMMIT=$(gh api "repos/otzaria/otzaria-library/commits/$OTZARIA_TAG" --jq .sha)
+          test "$OTZARIA_TAG_COMMIT" = "$OTZARIA_TARGET_COMMIT"
+          gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
+            --pattern "$OTZARIA_ASSET_NAME" --dir "$INPUTS/otzaria-assets"
+          test "$(stat -c %s "$INPUTS/otzaria-assets/$OTZARIA_ASSET_NAME")" = "$(jq -r .asset.size "$PROVENANCE")"
+          echo "$OTZARIA_ASSET_SHA  $INPUTS/otzaria-assets/$OTZARIA_ASSET_NAME" | sha256sum -c -
+          unzip -q "$INPUTS/otzaria-assets/$OTZARIA_ASSET_NAME" -d "$INPUTS/otzaria-extract"
+          mapfile -t LINEAGES < <(find "$INPUTS/otzaria-extract" -maxdepth 2 -type f -name manual_links_lineage.json)
+          test "${#LINEAGES[@]}" -eq 1
+          LINEAGE="${LINEAGES[0]}"
+          OTZARIA_EXTRACT_ROOT=$(dirname "$LINEAGE")
+          CONFIG="$OTZARIA_EXTRACT_ROOT/manual_links_sync.json"
+          test -f "$CONFIG" && test -d "$OTZARIA_EXTRACT_ROOT/links"
+          test "$(jq -r .seforim_tool_commit "$LINEAGE")" = "$SOURCE_COMMIT"
+          test "$(jq -r .sefaria.tag "$LINEAGE")" = "$SEFARIA_TAG"
+          test "$(jq -r .sefaria.release_metadata_sha256 "$LINEAGE")" = "$SEFARIA_METADATA_SHA"
+          test "$(jq -r .sefaria.archive.sha256 "$LINEAGE")" = "$SEFARIA_ARCHIVE_SHA"
+          jq -e --slurpfile metadata "$SEFARIA_METADATA" \
+            '.sefaria.run_id == $metadata[0].run_id and
+             .sefaria.run_attempt == $metadata[0].run_attempt and
+             .sefaria.archive == $metadata[0].archive' "$LINEAGE" >/dev/null
+          test "$(sha256sum "$CONFIG" | cut -d' ' -f1)" = "$(jq -r .config_sha256 "$LINEAGE")"
+          test "$(jq -r .target_commit "$PROVENANCE")" = "$OTZARIA_TARGET_COMMIT"
+          test "$(jq -r .lineage_sha256 "$PROVENANCE")" = "$(sha256sum "$LINEAGE" | cut -d' ' -f1)"
+
+          python3 - "$OTZARIA_EXTRACT_ROOT/links" "$LINEAGE" <<'PY'
+          import hashlib, pathlib, struct, sys
+          links, lineage = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          records = []
+          for entry in links.iterdir():
+              if entry.is_symlink() or not entry.is_file():
+                  raise SystemExit(f"non-regular or nested links entry: {entry}")
+              raw = entry.read_bytes()
+              records.append((f"links/{entry.name}".encode(), len(raw), hashlib.sha256(raw).digest()))
+          stream = bytearray(b"manual-links-tree-v1\0")
+          for path, size, digest in sorted(records, key=lambda row: row[0]):
+              stream += struct.pack(">I", len(path)) + path + struct.pack(">Q", size) + digest
+          actual = hashlib.sha256(stream).hexdigest()
+          import json
+          expected = json.loads(lineage.read_text(encoding="utf-8"))["packaged_links_tree_sha256"]
+          if actual != expected:
+              raise SystemExit(f"packaged links tree mismatch: {actual} != {expected}")
+          PY
+
+          {
+            echo "SEFARIA_EXTRACT_ROOT=$SEFARIA_EXTRACT_ROOT"
+            echo "OTZARIA_EXTRACT_ROOT=$OTZARIA_EXTRACT_ROOT"
+            echo "MANUAL_LINKS_LINEAGE=$LINEAGE"
+            echo "MANUAL_LINKS_CONFIG=$CONFIG"
+            echo "OTZARIA_ASSET_NAME=$OTZARIA_ASSET_NAME"
+          } >> "$GITHUB_ENV"
+
       # ─── Discover prior releases + decide db_version ───────────────────────
       # Tags are `v<dbVersion>-<utcTimestamp>` so version discovery is just
       # a regex on the tag list — no per-release asset fetch needed.
@@ -225,6 +485,8 @@ jobs:
           # -PlinkerSidecar makes the Sefaria import dump the RefEntry→lineId sidecar
           # this build's LINKER Phase-2 needs (see next step).
           ./gradlew generateSeforimDb \
+            -PexportDir="$SEFARIA_EXTRACT_ROOT" \
+            -PsourceDir="$OTZARIA_EXTRACT_ROOT" \
             -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
             -PdbVersion=${{ steps.discover.outputs.db_version }} \
             -PinMemoryDb=false \
@@ -315,9 +577,9 @@ jobs:
       # counts with ≥ semantics automatically (no --sefaria-stage — the DB has
       # also accumulated havrouta/otzaria/linker links by now).
       #
-      # --expect-snapshot is intentionally NOT passed: inputs are unpinned (plan
-      # 10א — git clone --depth 1 of Sefaria HEAD), so the snapshot baselines
-      # drift; each check derives its expected values from THIS build's schemas.
+      # --expect-snapshot is intentionally not passed here: the independent
+      # manualLinksCorpusTest has already locked the manual-link counts; these
+      # DB checks derive their expected values from this pinned build's schemas.
       # python3 (stdlib only) is the runtime; verify it like the deps script does
       # for sqlite3, then fail the job on any nonzero exit.
       - name: QA — run §10 checks on the full DB (required)
@@ -326,7 +588,7 @@ jobs:
           command -v python3
           python3 scripts/qa/run_all.py \
             --db build/seforim.db \
-            --sefaria-dir generator/sefariasqlite/build/sefaria \
+            --sefaria-dir "$SEFARIA_EXTRACT_ROOT" \
             --metrics build/seforim.db.link-import-metrics.json \
             --require-all
 
@@ -408,6 +670,16 @@ jobs:
 
       # ─── Stage release assets ──────────────────────────────────────────────
       - name: Stage release assets
+        env:
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+          OTZARIA_TAG: ${{ inputs.otzaria_tag }}
+          OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
+          EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
+          OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
         run: |
           set -euo pipefail
           STAGE=release-staging
@@ -435,54 +707,122 @@ jobs:
             exit 1
           fi
 
-      - name: Create GitHub pre-release and upload assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.release_meta.outputs.release_tag }}
-          name: ${{ steps.release_meta.outputs.release_tag }}
-          draft: false
-          prerelease: ${{ inputs.prerelease }}
-          files: release-staging/*
+          # Canonical, timestamp-free provenance. Asset hashes cover every
+          # payload file; build_provenance.json itself is covered by the
+          # release verification and pipeline result to avoid a hash cycle.
+          python3 - "$STAGE" "$MANUAL_LINKS_LINEAGE" <<'PY'
+          import hashlib, json, os, pathlib, sys
+          stage, lineage_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+          assets = []
+          for path in sorted(stage.iterdir(), key=lambda p: p.name.encode()):
+              raw = path.read_bytes()
+              assets.append({"name": path.name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+          value = {
+              "schema_version": 1,
+              "correlation_id": os.environ["CORRELATION_ID"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "sefaria_tag": os.environ["SEFARIA_TAG"],
+              "sefaria_release_metadata_sha256": os.environ["SEFARIA_METADATA_SHA"],
+              "sefaria_archive_sha256": os.environ["SEFARIA_ARCHIVE_SHA"],
+              "otzaria_tag": os.environ["OTZARIA_TAG"],
+              "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
+              "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
+              "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
+              "lineage_sha256": hashlib.sha256(lineage_path.read_bytes()).hexdigest(),
+              "config_sha256": lineage["config_sha256"],
+              "source_links_tree_sha256": lineage["source_links_tree_sha256"],
+              "packaged_links_tree_sha256": lineage["packaged_links_tree_sha256"],
+              "assets": assets,
+          }
+          (stage / "build_provenance.json").write_text(
+              json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
-      # Regenerate release-manifest.json inline and push it to otzaria (the main
-      # branch). We can't dispatch the separate update-release-manifest workflow
-      # from here (GITHUB_TOKEN is blocked from triggering other workflows to
-      # prevent recursion). Doing it inline gives atomicity — the manifest
-      # reflects the release we just published before this run finishes.
-      - name: Refresh release-manifest.json on otzaria
+      - name: Create draft, verify every uploaded asset, then publish
+        id: publish
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
-          # `gh release view` (no args) → the "Latest" tagged release. With
-          # only pre-releases the call fails; in that case the manifest's
-          # `latest` field stays null.
-          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
-            LATEST_ARG=(--argjson latest "$LATEST_JSON")
-          else
-            LATEST_ARG=(--argjson latest null)
-          fi
-          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
-          GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          jq -n \
-            --arg generatedAt "$GENERATED_AT" \
-            "${LATEST_ARG[@]}" \
-            --argjson releases "$ALL_RELEASES" \
-            '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
-            > release-manifest.json
-          echo "release-manifest.json:"
-          cat release-manifest.json
+          # No --clobber: an existing tag or asset is a lineage conflict.
+          gh release create "$RELEASE_TAG" --target "$SOURCE_COMMIT" --title "$RELEASE_TAG" --draft
+          gh release upload "$RELEASE_TAG" release-staging/*
+          VERIFY="$RUNNER_TEMP/release-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "$VERIFY" && mkdir -p "$VERIFY"
+          while IFS= read -r file; do
+            name=$(basename "$file")
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$VERIFY"
+            test "$(stat -c %s "$VERIFY/$name")" = "$(stat -c %s "$file")"
+            test "$(sha256sum "$VERIFY/$name" | cut -d' ' -f1)" = "$(sha256sum "$file" | cut -d' ' -f1)"
+          done < <(find release-staging -maxdepth 1 -type f -print | sort)
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add release-manifest.json
-          if git diff --staged --quiet; then
-            echo "Manifest unchanged — nothing to commit."
-          else
-            git commit -m "Update release manifest [skip ci]"
-            # Rebase onto remote otzaria in case any concurrent push landed
-            # between the start of this job and now.
-            git pull --rebase origin otzaria
-            git push origin HEAD:otzaria
-          fi
+      - name: Write exact child result
+        env:
+          RELEASE_TAG: ${{ steps.publish.outputs.release_tag }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+          OTZARIA_TAG: ${{ inputs.otzaria_tag }}
+          OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
+          EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
+          OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p pipeline-result
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          stage = pathlib.Path("release-staging")
+          provenance_path = stage / "build_provenance.json"
+          provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+          assets = []
+          for path in sorted(stage.iterdir(), key=lambda item: item.name.encode("utf-8")):
+              raw = path.read_bytes()
+              assets.append({"name": path.name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+          value = {
+              "schema_version": 1,
+              "status": "published",
+              "correlation_id": os.environ["CORRELATION_ID"],
+              "child_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "child_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "sefaria_tag": os.environ["SEFARIA_TAG"],
+              "sefaria_release_metadata_sha256": os.environ["SEFARIA_METADATA_SHA"],
+              "sefaria_archive_sha256": os.environ["SEFARIA_ARCHIVE_SHA"],
+              "otzaria_tag": os.environ["OTZARIA_TAG"],
+              "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
+              "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
+              "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
+              "release_tag": os.environ["RELEASE_TAG"],
+              "build_provenance_sha256": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
+              "lineage_sha256": provenance["lineage_sha256"],
+              "config_sha256": provenance["config_sha256"],
+              "source_links_tree_sha256": provenance["source_links_tree_sha256"],
+              "packaged_links_tree_sha256": provenance["packaged_links_tree_sha256"],
+              "assets": assets,
+          }
+          pathlib.Path("pipeline-result/pipeline-result.json").write_text(
+              json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          sha256sum pipeline-result/pipeline-result.json | cut -d' ' -f1 > pipeline-result/pipeline-result.sha256
+
+      - name: Upload exact child result
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-result
+          path: pipeline-result/
+          if-no-files-found: error
+          retention-days: 30
 
       # Release the RAM tmpfs no matter how the job ended. By now assets are
       # already uploaded and staged on real disk, so discarding build/ is safe;
@@ -505,3 +845,111 @@ jobs:
       - name: Clean run-scoped disk leftovers (workspace persists on self-hosted)
         if: always()
         run: rm -rf prev-dbs patches release-staging prior-versions.tsv
+
+  reuse-result:
+    name: Return the already-published exact build
+    needs: reconcile
+    if: needs.reconcile.outputs.reuse == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write exact child result
+        env:
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+          OTZARIA_TAG: ${{ inputs.otzaria_tag }}
+          OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
+          EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
+          OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          RELEASE_TAG: ${{ needs.reconcile.outputs.release_tag }}
+          BUILD_PROVENANCE_SHA: ${{ needs.reconcile.outputs.build_provenance_sha256 }}
+          LINEAGE_SHA: ${{ needs.reconcile.outputs.lineage_sha256 }}
+          CONFIG_SHA: ${{ needs.reconcile.outputs.config_sha256 }}
+          SOURCE_TREE_SHA: ${{ needs.reconcile.outputs.source_links_tree_sha256 }}
+          PACKAGED_TREE_SHA: ${{ needs.reconcile.outputs.packaged_links_tree_sha256 }}
+          ASSETS_JSON: ${{ needs.reconcile.outputs.assets_json }}
+        run: |
+          set -euo pipefail
+          mkdir -p pipeline-result
+          python3 - <<'PY'
+          import json, os, pathlib
+          value = {
+              "schema_version": 1,
+              "status": "reused",
+              "correlation_id": os.environ["CORRELATION_ID"],
+              "child_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "child_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "sefaria_tag": os.environ["SEFARIA_TAG"],
+              "sefaria_release_metadata_sha256": os.environ["SEFARIA_METADATA_SHA"],
+              "sefaria_archive_sha256": os.environ["SEFARIA_ARCHIVE_SHA"],
+              "otzaria_tag": os.environ["OTZARIA_TAG"],
+              "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
+              "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
+              "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
+              "release_tag": os.environ["RELEASE_TAG"],
+              "build_provenance_sha256": os.environ["BUILD_PROVENANCE_SHA"],
+              "lineage_sha256": os.environ["LINEAGE_SHA"],
+              "config_sha256": os.environ["CONFIG_SHA"],
+              "source_links_tree_sha256": os.environ["SOURCE_TREE_SHA"],
+              "packaged_links_tree_sha256": os.environ["PACKAGED_TREE_SHA"],
+              "assets": json.loads(os.environ["ASSETS_JSON"]),
+          }
+          pathlib.Path("pipeline-result/pipeline-result.json").write_text(
+              json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          sha256sum pipeline-result/pipeline-result.json | cut -d' ' -f1 > pipeline-result/pipeline-result.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-result
+          path: pipeline-result/
+          if-no-files-found: error
+          retention-days: 30
+
+  refresh-release-manifest:
+    name: Refresh release-manifest.json after publish or verified reuse
+    needs: [reconcile, build-and-release, reuse-result]
+    if: >-
+      always() && needs.reconcile.result == 'success' &&
+      (needs.build-and-release.result == 'success' || needs.reuse-result.result == 'success')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: otzaria
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Regenerate and push the release manifest
+        run: |
+          set -euo pipefail
+          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null | jq -cS 'del(.assets[].downloadCount)'); then
+            LATEST_ARG=(--argjson latest "$LATEST_JSON")
+          else
+            LATEST_ARG=(--argjson latest null)
+          fi
+          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 1000)
+          # Derive the timestamp from immutable release state.  A verified reuse
+          # must regenerate the same bytes instead of committing a wall-clock-only
+          # change every time the parent pipeline is retried.
+          GENERATED_AT=$(jq -r '[.[].publishedAt | select(. != null)] | max // "1970-01-01T00:00:00Z"' <<<"$ALL_RELEASES")
+          jq -n \
+            --arg generatedAt "$GENERATED_AT" \
+            "${LATEST_ARG[@]}" \
+            --argjson releases "$ALL_RELEASES" \
+            '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
+            > release-manifest.json
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add release-manifest.json
+          if ! git diff --staged --quiet; then
+            git commit -m "Update release manifest [skip ci]"
+            git pull --rebase origin otzaria
+            gh auth setup-git
+            git push origin HEAD:otzaria
+          fi
