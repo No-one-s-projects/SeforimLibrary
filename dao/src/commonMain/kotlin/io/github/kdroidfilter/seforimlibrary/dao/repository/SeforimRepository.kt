@@ -28,12 +28,30 @@ import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
 import io.github.kdroidfilter.seforimlibrary.core.models.Source
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.Topic
+import io.github.kdroidfilter.seforimlibrary.core.text.normalizeCategoryPath
+import io.github.kdroidfilter.seforimlibrary.core.text.normalizeCategoryPathSegment
 import io.github.kdroidfilter.seforimlibrary.dao.extensions.toModel
+import io.github.kdroidfilter.seforimlibrary.db.Category as DbCategory
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import io.github.kdroidfilter.seforimlibrary.env.getEnvironmentVariable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+
+/** A complete replacement of both description fields for one category. */
+data class CategoryDescriptionUpdate(
+    val categoryId: Long,
+    val heShortDesc: String?,
+    val heDesc: String?,
+)
+
+/** A category description row addressed by its canonical full hierarchy path. */
+data class CategoryDescriptionRow(
+    val categoryId: Long,
+    val canonicalPath: String,
+    val heShortDesc: String?,
+    val heDesc: String?,
+)
 
 /**
  * Repository class for accessing and manipulating the Seforim database.
@@ -47,7 +65,8 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     private val json = Json { ignoreUnknownKeys = true }
     private val logger = Logger.withTag("SeforimRepository")
 
-    // Category rows are immutable at runtime, so a plain read-through cache avoids
+    // Category rows are immutable during normal reads; explicit metadata updates
+    // invalidate their affected entries. A plain read-through cache avoids
     // paying a SQLite prepare + connection round-trip for every breadcrumb/tree walk.
     // Profiling (see JFR 2026-04-23) showed 70 `sqlite3_prepare` calls in 20 s all
     // coming from `getCategory`. Both KMP targets (JVM + Android) are JVM-based so
@@ -341,6 +360,85 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         database.categoryQueriesQueries.selectManyByTitleLike(pattern, limit.toLong()).executeAsList().map { it.toModel() }
     }
 
+    /**
+     * Returns every category description together with its normalized full path.
+     * The tree is read in one query. Parent chains are memoized, so path
+     * construction costs O(sum of category path depths).
+     *
+     * @throws IllegalStateException if the category hierarchy is malformed or
+     * two category ids resolve to the same canonical path.
+     */
+    suspend fun getAllCategoryDescriptionRows(): List<CategoryDescriptionRow> = withContext(Dispatchers.IO) {
+        val categories = database.categoryQueriesQueries.selectAll().executeAsList()
+        val byId: Map<Long, DbCategory> = categories.associateBy { it.id }
+        val pathsById = HashMap<Long, List<String>>(categories.size)
+        val visiting = HashSet<Long>()
+
+        fun pathSegments(category: DbCategory): List<String> {
+            pathsById[category.id]?.let { return it }
+            check(visiting.add(category.id)) {
+                "Cycle in category hierarchy at id=${category.id}, title='${category.title}'"
+            }
+
+            val segment = normalizeCategoryPathSegment(category.title)
+            check(segment.isNotEmpty() && '/' !in segment) {
+                "Invalid category path segment at id=${category.id}, title='${category.title}'"
+            }
+            val parentSegments = category.parentId?.let { parentId ->
+                val parent = byId[parentId]
+                    ?: error(
+                        "Missing parent id=$parentId for category " +
+                            "id=${category.id}, title='${category.title}'",
+                    )
+                pathSegments(parent)
+            }.orEmpty()
+            val result = parentSegments + segment
+            visiting.remove(category.id)
+            pathsById[category.id] = result
+            return result
+        }
+
+        val ownerByPath = HashMap<String, Long>(categories.size)
+        categories.map { category ->
+            val canonicalPath = normalizeCategoryPath(pathSegments(category))
+            val existingId = ownerByPath.putIfAbsent(canonicalPath, category.id)
+            check(existingId == null) {
+                "Duplicate category path '$canonicalPath' for ids $existingId and ${category.id}"
+            }
+            CategoryDescriptionRow(
+                categoryId = category.id,
+                canonicalPath = canonicalPath,
+                heShortDesc = category.heShortDesc,
+                heDesc = category.heDesc,
+            )
+        }
+    }
+
+    /**
+     * Atomically replaces category descriptions and invalidates only changed
+     * category cache entries after the transaction commits successfully.
+     */
+    suspend fun setCategoryDescriptionsBatch(
+        updates: List<CategoryDescriptionUpdate>,
+    ) {
+        if (updates.isEmpty()) return
+        require(updates.map { it.categoryId }.toSet().size == updates.size) {
+            "Category description batch contains duplicate category ids"
+        }
+        withContext(Dispatchers.IO) {
+            database.transaction {
+                updates.forEach { update ->
+                    database.categoryQueriesQueries.setDescriptions(
+                        heShortDesc = update.heShortDesc,
+                        heDesc = update.heDesc,
+                        id = update.categoryId,
+                    )
+                }
+            }
+            updates.forEach { categoryCache.remove(it.categoryId) }
+        }
+    }
+
 
 
     /**
@@ -381,7 +479,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 parentId = category.parentId,
                 title = category.title,
                 level = category.level.toLong(),
-                orderIndex = category.order.toLong()
+                orderIndex = category.order.toLong(),
+                heShortDesc = category.heShortDesc,
+                heDesc = category.heDesc,
             )
 
             val insertedId = database.categoryQueriesQueries.lastInsertRowId().executeAsOne()
@@ -3016,6 +3116,8 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         title: String,
         level: Int,
         orderIndex: Int,
+        heShortDesc: String? = null,
+        heDesc: String? = null,
     ) = withContext(Dispatchers.IO) {
         database.categoryQueriesQueries.insertWithId(
             id = id,
@@ -3023,6 +3125,8 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             title = title,
             level = level.toLong(),
             orderIndex = orderIndex.toLong(),
+            heShortDesc = heShortDesc,
+            heDesc = heDesc,
         )
     }
 

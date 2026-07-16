@@ -60,6 +60,7 @@ internal val FOR_DB_CSV_FILES = mapOf(
     "bookRenames" to "book_renames.csv",
     "bookMoves" to "book_moves.csv",
     "generations" to "generations.csv",
+    "categoryDescriptions" to "sefaria_category_changes.csv",
 )
 
 fun main(args: Array<String>) {
@@ -131,9 +132,9 @@ fun main(args: Array<String>) {
 internal fun parsePairs(lines: List<String>, sourceName: String = "pairs CSV"): List<Pair<String, String>> =
     parseRequiredCsvRows(lines, sourceName, minFields = 2).map { f -> f[0] to f[1] }
 
-private enum class CategoryMatchMode { Exact, Prefix }
+internal enum class CategoryMatchMode { Exact, Prefix }
 
-private data class CategoryRename(
+internal data class CategoryRename(
     val oldName: String,
     val newName: String,
     val matchMode: CategoryMatchMode,
@@ -212,13 +213,15 @@ internal fun parseForDbCsvRecords(text: String): List<List<String>> {
     var fields = mutableListOf<String>()
     val sb = StringBuilder()
     var inQuotes = false
+    var recordHasCsvSyntax = false
     var i = 0
 
     fun endField() { fields.add(sb.toString()); sb.setLength(0) }
     fun endRecord() {
         endField()
-        if (fields.any { it.isNotEmpty() }) records.add(fields)
+        if (fields.any { it.isNotEmpty() } || recordHasCsvSyntax) records.add(fields)
         fields = mutableListOf()
+        recordHasCsvSyntax = false
     }
 
     while (i < text.length) {
@@ -230,8 +233,14 @@ internal fun parseForDbCsvRecords(text: String): List<List<String>> {
             } else sb.append(c)
         } else {
             when (c) {
-                '"' -> if (sb.isEmpty()) inQuotes = true else sb.append(c)
-                ',' -> endField()
+                '"' -> if (sb.isEmpty()) {
+                    inQuotes = true
+                    recordHasCsvSyntax = true
+                } else sb.append(c)
+                ',' -> {
+                    recordHasCsvSyntax = true
+                    endField()
+                }
                 '\n' -> endRecord()
                 '\r' -> if (i + 1 < text.length && text[i + 1] == '\n') { endRecord(); i++ } else endRecord()
                 else -> sb.append(c)
@@ -239,6 +248,7 @@ internal fun parseForDbCsvRecords(text: String): List<List<String>> {
         }
         i++
     }
+    require(!inQuotes) { "Unterminated quoted field in ForDB CSV" }
     if (sb.isNotEmpty() || fields.isNotEmpty()) endRecord()
     return records
 }
@@ -270,7 +280,7 @@ private fun <T> runSection(name: String, items: List<T>, logger: Logger, apply: 
     return applied
 }
 
-private sealed class RenameResult {
+internal sealed class RenameResult {
     data class Renamed(val count: Int) : RenameResult()
     data class Merged(val booksMoved: Int) : RenameResult()
     data object NotFound : RenameResult()
@@ -287,7 +297,7 @@ private sealed class RenameResult {
  *
  * @return The result of the operation
  */
-private fun renameOrMergeCategory(
+internal fun renameOrMergeCategory(
     conn: Connection,
     rule: CategoryRename,
     logger: Logger
@@ -308,7 +318,8 @@ private fun renameOrMergeCategory(
         val targetId = findCategoryByNameAndParent(conn, newName, parentId)
 
         if (targetId != null && targetId != sourceId) {
-            // Merge: move books from source to target, then delete source
+            // Resolve descriptions before any destructive part of the merge.
+            mergeCategoryDescriptions(conn, sourceId, targetId)
             val booksMoved = moveBooksToCategory(conn, sourceId, targetId)
             val subCatsMoved = moveSubcategoriesToParent(conn, sourceId, targetId)
             deleteCategory(conn, sourceId)
@@ -347,6 +358,53 @@ private fun findCategoryByNameAndParent(conn: Connection, name: String, parentId
         stmt.executeQuery().use { rs ->
             return if (rs.next()) rs.getLong(1) else null
         }
+    }
+}
+
+private data class StoredCategoryDescriptions(
+    val heShortDesc: String?,
+    val heDesc: String?,
+)
+
+/** Preserves non-conflicting descriptions when one category is merged into another. */
+internal fun mergeCategoryDescriptions(conn: Connection, sourceId: Long, targetId: Long) {
+    fun read(categoryId: Long): StoredCategoryDescriptions =
+        conn.prepareStatement(
+            "SELECT heShortDesc, heDesc FROM category WHERE id = ?",
+        ).use { stmt ->
+            stmt.setLong(1, categoryId)
+            stmt.executeQuery().use { result ->
+                check(result.next()) { "Category id=$categoryId disappeared during merge" }
+                StoredCategoryDescriptions(
+                    heShortDesc = result.getString(1),
+                    heDesc = result.getString(2),
+                )
+            }
+        }
+
+    fun resolve(field: String, source: String?, target: String?): String? = when {
+        source == null -> target
+        target == null -> source
+        source == target -> target
+        else -> error(
+            "Cannot merge category id=$sourceId into id=$targetId: " +
+                "conflicting $field values",
+        )
+    }
+
+    val source = read(sourceId)
+    val target = read(targetId)
+    val mergedShort = resolve("heShortDesc", source.heShortDesc, target.heShortDesc)
+    val mergedLong = resolve("heDesc", source.heDesc, target.heDesc)
+    if (mergedShort == target.heShortDesc && mergedLong == target.heDesc) return
+
+    conn.prepareStatement(
+        "UPDATE category SET heShortDesc = ?, heDesc = ? WHERE id = ?",
+    ).use { stmt ->
+        stmt.setString(1, mergedShort)
+        stmt.setString(2, mergedLong)
+        stmt.setLong(3, targetId)
+        check(stmt.executeUpdate() == 1) { "Failed to update merge target category id=$targetId" }
     }
 }
 

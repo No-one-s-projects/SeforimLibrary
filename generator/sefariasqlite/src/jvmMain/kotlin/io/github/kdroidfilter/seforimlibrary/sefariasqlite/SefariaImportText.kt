@@ -1,8 +1,10 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.core.text.normalizeCategoryPathSegment
+
 internal fun sanitizeFolder(name: String?): String {
     if (name.isNullOrBlank()) return ""
-    return name.replace("\"", "״").trim()
+    return normalizeCategoryPathSegment(name)
 }
 
 // Legacy Otzar HaChochma style/format markers that Sefaria did not strip when
