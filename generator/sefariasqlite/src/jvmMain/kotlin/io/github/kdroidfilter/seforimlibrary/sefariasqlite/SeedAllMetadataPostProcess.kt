@@ -5,6 +5,8 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.core.text.normalizeCategoryPath
+import io.github.kdroidfilter.seforimlibrary.dao.repository.CategoryDescriptionUpdate
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -44,6 +46,7 @@ import kotlin.system.exitProcess
  */
 private const val ALL_METADATA_FILE = "all_metadata.json"
 private const val METADATA_CHANGES_FILE = "sefaria_metadata_changes.csv"
+private val CATEGORY_DESCRIPTIONS_FILE = FOR_DB_CSV_FILES.getValue("categoryDescriptions")
 
 private val json = Json { ignoreUnknownKeys = true }
 
@@ -60,6 +63,9 @@ fun main(args: Array<String>) = runBlocking {
 
     val bulk = parseBulkMetadata(downloadRequiredForDbFile(ALL_METADATA_FILE, logger))
     val descriptions = parseDescriptionOverrides(downloadRequiredForDbFile(METADATA_CHANGES_FILE, logger))
+    val categoryOverrides = parseCategoryDescriptionOverrides(
+        downloadRequiredForDbFile(CATEGORY_DESCRIPTIONS_FILE, logger),
+    )
 
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
     val repository = SeforimRepository(dbPath.toString(), driver)
@@ -76,6 +82,7 @@ fun main(args: Array<String>) = runBlocking {
         val bindings = IdAllocatorBindings(allocator, repository)
 
         val result = applyMetadata(repository, bindings, bulk, descriptions, logger)
+        val categoryResult = applyCategoryDescriptionOverrides(repository, categoryOverrides, logger)
         runCatching {
             allocator.snapshotTo(
                 target = buildStatePath,
@@ -85,7 +92,11 @@ fun main(args: Array<String>) = runBlocking {
                 ),
             )
         }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        logger.i { "All-metadata done: updated=${result.updated} unmatched=${result.unmatched}" }
+        logger.i {
+            "All-metadata done: updated=${result.updated} unmatched=${result.unmatched}; " +
+                "category records=${categoryResult.records} updates=${categoryResult.updated} " +
+                "unchanged=${categoryResult.unchanged}"
+        }
     } catch (e: Exception) {
         logger.e(e) { "Failed to seed all-metadata; aborting" }
         exitProcess(1)
@@ -111,6 +122,119 @@ internal data class Description(
 )
 
 internal data class MetadataResult(val updated: Int, val unmatched: Int)
+
+internal sealed interface DescriptionEdit {
+    data object Keep : DescriptionEdit
+    data object Clear : DescriptionEdit
+    data class Replace(val value: String) : DescriptionEdit
+}
+
+internal data class CategoryDescriptionOverride(
+    val csvRecordNumber: Int,
+    val canonicalPath: String,
+    val shortEdit: DescriptionEdit,
+    val longEdit: DescriptionEdit,
+)
+
+internal data class CategoryDescriptionApplyResult(
+    val records: Int,
+    val updated: Int,
+    val unchanged: Int,
+)
+
+internal fun parseDescriptionEdit(raw: String): DescriptionEdit {
+    val value = raw.trim()
+    return when {
+        value.isEmpty() -> DescriptionEdit.Keep
+        value == "[מחק]" -> DescriptionEdit.Clear
+        else -> DescriptionEdit.Replace(value)
+    }
+}
+
+internal fun parseCategoryDescriptionOverrides(lines: List<String>): List<CategoryDescriptionOverride> {
+    val records = parseForDbCsvRecords(lines.joinToString("\n"))
+    val expectedHeader = listOf(
+        "categoryPath",
+        "heShortDesc",
+        "heDesc",
+        "heShortDescNew",
+        "heDescNew",
+    )
+    require(records.firstOrNull() == expectedHeader) {
+        buildString {
+            append("$CATEGORY_DESCRIPTIONS_FILE must start with exactly ")
+            append(expectedHeader.joinToString(","))
+        }
+    }
+
+    val firstRecordByPath = mutableMapOf<String, Int>()
+    return records.drop(1).mapIndexed { index, record ->
+        val recordNumber = index + 2
+        require(record.size == expectedHeader.size) {
+            "$CATEGORY_DESCRIPTIONS_FILE record $recordNumber must contain exactly five fields"
+        }
+        val path = record[0]
+        require(path.isNotBlank()) {
+            "$CATEGORY_DESCRIPTIONS_FILE record $recordNumber has an empty categoryPath"
+        }
+        require(!path.startsWith('/') && !path.endsWith('/') && "//" !in path) {
+            "$CATEGORY_DESCRIPTIONS_FILE record $recordNumber has empty category-path segment: '$path'"
+        }
+        val normalized = normalizeCategoryPath(path.split('/'))
+        require(normalized == path) {
+            "$CATEGORY_DESCRIPTIONS_FILE record $recordNumber has non-normalized categoryPath '$path'; " +
+                "expected '$normalized'"
+        }
+        val previousRecord = firstRecordByPath.putIfAbsent(path, recordNumber)
+        require(previousRecord == null) {
+            "$CATEGORY_DESCRIPTIONS_FILE records $previousRecord and $recordNumber duplicate categoryPath '$path'"
+        }
+        CategoryDescriptionOverride(
+            csvRecordNumber = recordNumber,
+            canonicalPath = path,
+            shortEdit = parseDescriptionEdit(record[3]),
+            longEdit = parseDescriptionEdit(record[4]),
+        )
+    }
+}
+
+internal fun applyDescriptionEdit(current: String?, edit: DescriptionEdit): String? = when (edit) {
+    DescriptionEdit.Keep -> current
+    DescriptionEdit.Clear -> null
+    is DescriptionEdit.Replace -> edit.value
+}
+
+internal suspend fun applyCategoryDescriptionOverrides(
+    repository: SeforimRepository,
+    overrides: List<CategoryDescriptionOverride>,
+    logger: Logger,
+): CategoryDescriptionApplyResult {
+    val rowsByPath = repository.getAllCategoryDescriptionRows().associateBy { it.canonicalPath }
+    val updates = overrides.mapNotNull { override ->
+        val current = requireNotNull(rowsByPath[override.canonicalPath]) {
+            "$CATEGORY_DESCRIPTIONS_FILE record ${override.csvRecordNumber} references missing " +
+                "category '${override.canonicalPath}'"
+        }
+        val shortValue = applyDescriptionEdit(current.heShortDesc, override.shortEdit)
+        val longValue = applyDescriptionEdit(current.heDesc, override.longEdit)
+        if (shortValue == current.heShortDesc && longValue == current.heDesc) {
+            null
+        } else {
+            CategoryDescriptionUpdate(current.categoryId, shortValue, longValue)
+        }
+    }
+    repository.setCategoryDescriptionsBatch(updates)
+    val result = CategoryDescriptionApplyResult(
+        records = overrides.size,
+        updated = updates.size,
+        unchanged = overrides.size - updates.size,
+    )
+    logger.i {
+        "Category description overrides: records=${result.records}, " +
+            "updates=${result.updated}, unchanged=${result.unchanged}"
+    }
+    return result
+}
 
 internal fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
     json.parseToJsonElement(lines.joinToString("\n")).jsonArray.mapNotNull { element ->

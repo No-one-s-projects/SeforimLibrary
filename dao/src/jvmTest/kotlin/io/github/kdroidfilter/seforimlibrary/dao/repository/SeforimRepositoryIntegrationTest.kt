@@ -1,5 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.dao.repository
 
+import app.cash.sqldelight.db.QueryResult
+import app.cash.sqldelight.db.SqlCursor
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
@@ -12,6 +14,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -69,6 +72,111 @@ class SeforimRepositoryIntegrationTest {
     }
 
     // ==================== Category Tests ====================
+
+    @Test
+    fun `category inserts round-trip descriptions`() = runBlocking {
+        val generatedId = repository.insertCategory(
+            Category(title = "תנ״ך", heShortDesc = "קצר", heDesc = "ארוך"),
+        )
+        repository.insertCategoryWithId(
+            id = 4_242,
+            parentId = generatedId,
+            title = "תרגומים",
+            level = 1,
+            orderIndex = 1,
+            heShortDesc = "קצר בן",
+            heDesc = "ארוך בן",
+        )
+
+        assertEquals("קצר", repository.getCategory(generatedId)?.heShortDesc)
+        assertEquals("ארוך", repository.getCategory(generatedId)?.heDesc)
+        assertEquals("קצר בן", repository.getCategory(4_242)?.heShortDesc)
+        assertEquals("ארוך בן", repository.getCategory(4_242)?.heDesc)
+    }
+
+    @Test
+    fun `category description rows build normalized full paths in one tree read`() = runBlocking {
+        val root = repository.insertCategory(Category(title = " תנ\"ך "))
+        val child = repository.insertCategory(Category(parentId = root, title = "תרגומים", level = 1))
+        repository.insertCategory(Category(parentId = child, title = "אונקלוס", level = 2))
+
+        assertEquals(
+            setOf("תנ״ך", "תנ״ך/תרגומים", "תנ״ך/תרגומים/אונקלוס"),
+            repository.getAllCategoryDescriptionRows().map { it.canonicalPath }.toSet(),
+        )
+    }
+
+    @Test
+    fun `category description rows reject broken trees`() = runBlocking {
+        driver.execute(null, "INSERT INTO category (id,parentId,title) VALUES (900,901,'orphan')", 0)
+        val missing = assertFailsWith<IllegalStateException> {
+            repository.getAllCategoryDescriptionRows()
+        }
+        assertTrue(missing.message.orEmpty().contains("Missing parent"))
+
+        driver.execute(null, "DELETE FROM category", 0)
+        driver.execute(null, "INSERT INTO category (id,parentId,title) VALUES (900,NULL,'a')", 0)
+        driver.execute(null, "INSERT INTO category (id,parentId,title) VALUES (901,900,'b')", 0)
+        driver.execute(null, "UPDATE category SET parentId=901 WHERE id=900", 0)
+        val cycle = assertFailsWith<IllegalStateException> {
+            repository.getAllCategoryDescriptionRows()
+        }
+        assertTrue(cycle.message.orEmpty().contains("Cycle"))
+
+        driver.execute(null, "DELETE FROM category", 0)
+        driver.execute(null, "INSERT INTO category (id,parentId,title) VALUES (900,NULL,'same')", 0)
+        driver.execute(null, "INSERT INTO category (id,parentId,title) VALUES (901,NULL,'same')", 0)
+        val duplicate = assertFailsWith<IllegalStateException> {
+            repository.getAllCategoryDescriptionRows()
+        }
+        assertTrue(duplicate.message.orEmpty().contains("Duplicate category path"))
+    }
+
+    @Test
+    fun `category description batch is atomic and invalidates cache`() = runBlocking {
+        val first = repository.insertCategory(Category(title = "first"))
+        val second = repository.insertCategory(Category(title = "second"))
+        assertNull(repository.getCategory(first)?.heShortDesc)
+
+        repository.setCategoryDescriptionsBatch(
+            listOf(
+                CategoryDescriptionUpdate(first, "short", "long"),
+                CategoryDescriptionUpdate(second, "short 2", null),
+            ),
+        )
+        assertEquals("short", repository.getCategory(first)?.heShortDesc)
+
+        driver.execute(
+            null,
+            "CREATE TRIGGER fail_second BEFORE UPDATE ON category " +
+                "WHEN NEW.id=$second BEGIN SELECT RAISE(ABORT, 'test'); END",
+            0,
+        )
+        assertFailsWith<Exception> {
+            repository.setCategoryDescriptionsBatch(
+                listOf(
+                    CategoryDescriptionUpdate(first, "changed", null),
+                    CategoryDescriptionUpdate(second, "changed", null),
+                ),
+            )
+        }
+        fun readDirect(categoryId: Long): Pair<String?, String?> = driver.executeQuery(
+            identifier = null,
+            sql = "SELECT heShortDesc, heDesc FROM category WHERE id = ?",
+            mapper = { cursor: SqlCursor ->
+                check(cursor.next().value)
+                QueryResult.Value(cursor.getString(0) to cursor.getString(1))
+            },
+            parameters = 1,
+        ) {
+            bindLong(0, categoryId)
+        }.value
+
+        // Read through the driver, bypassing categoryCache, to prove SQLite
+        // rolled back the first update when the trigger aborted the second.
+        assertEquals("short" to "long", readDirect(first))
+        assertEquals("short 2" to null, readDirect(second))
+    }
 
     @Test
     fun `insertCategory creates root category`() = runBlocking {

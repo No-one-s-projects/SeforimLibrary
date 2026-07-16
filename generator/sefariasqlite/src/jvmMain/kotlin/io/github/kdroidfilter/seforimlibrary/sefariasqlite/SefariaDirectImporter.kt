@@ -68,8 +68,11 @@ class SefariaDirectImporter(
             logger.i { "Source-hash classification: ${classification.summary()}" }
         }
 
-        // Parse table of contents for ordering
-        val (categoryOrders, bookOrders) = parseTableOfContentsOrders(dbRoot, json, logger)
+        // Parse table of contents once for ordering and category descriptions.
+        val toc = parseTableOfContentsMetadata(dbRoot, json, logger)
+        val categoryOrders = toc.categoryOrders
+        val bookOrders = toc.bookOrders
+        val categoryDescriptions = toc.categoryDescriptions
         require(jsonDir.isDirectory() && schemaDir.isDirectory()) { "Missing json/schemas under $dbRoot" }
 
         val bookPayloadReader = SefariaBookPayloadReader(json, logger)
@@ -159,6 +162,7 @@ class SefariaDirectImporter(
         val sourceId = bindings.upsertSource(sourceName)
         val categoryIds = ConcurrentHashMap<String, Long>()
         val categoryLevelsById = ConcurrentHashMap<Long, Int>()
+        val usedCategoryDescriptionKeys = mutableSetOf<String>()
 
         suspend fun ensureCategoryPath(pathParts: List<String>): Long {
             var parentId: Long? = null
@@ -173,13 +177,17 @@ class SefariaDirectImporter(
                     return@forEachIndexed
                 }
                 val categoryOrder = categoryOrders[key] ?: categoryOrders[part] ?: 999
+                val descriptions = categoryDescriptions[key]
                 val id = bindings.upsertCategory(
                     canonicalPath = key,
                     parentId = parentId,
                     title = part,
                     level = idx,
                     orderIndex = categoryOrder,
+                    heShortDesc = descriptions?.heShortDesc,
+                    heDesc = descriptions?.heDesc,
                 )
+                if (descriptions != null) usedCategoryDescriptionKeys += key
                 categoryIds[key] = id
                 categoryLevelsById[id] = idx
                 parentId = id
@@ -599,6 +607,12 @@ class SefariaDirectImporter(
             }
         }
         logger.i { "Recorded source hashes for $recorded / ${currentSourceHashes.size} Sefaria books" }
+
+        logger.i {
+            "Category descriptions: parsed=${categoryDescriptions.size}, " +
+                "used=${usedCategoryDescriptionKeys.size}, " +
+                "unused=${categoryDescriptions.keys.count { it !in usedCategoryDescriptionKeys }}"
+        }
 
         logger.i { "Direct Sefaria import completed." }
     }

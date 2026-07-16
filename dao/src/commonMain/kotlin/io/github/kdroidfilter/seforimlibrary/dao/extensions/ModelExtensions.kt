@@ -124,7 +124,9 @@ fun io.github.kdroidfilter.seforimlibrary.db.Category.toModel(): Category {
         id = id,
         parentId = parentId,
         title = title,
-        level = level.toInt()
+        level = level.toInt(),
+        heShortDesc = heShortDesc,
+        heDesc = heDesc,
     )
 }
 
