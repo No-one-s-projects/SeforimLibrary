@@ -27,6 +27,7 @@ import kotlin.system.exitProcess
  *
  * Rules are downloaded from otzaria-library/ForDB/ on GitHub (UTF-8):
  *  - category_renames.csv `old,new` — category renames (exact match, explicit prefix rules)
+ *  - category_moves.csv   `sourcePath,destParentPath` — reparent a category (with its subtree) under a new parent
  *  - book_renames.csv     `old,new` — book title renames (exact match)
  *  - book_moves.csv       `name,sourcePath,destPath` (simple CSV; embedded newlines in quoted fields are not supported)
  *
@@ -41,8 +42,14 @@ import kotlin.system.exitProcess
  * Book moves require the source path and the destination's parent path to exist;
  * only the final (leaf) destination segment is auto-created if missing (idempotent).
  *
- * Order of operations: category renames → book renames → book moves. Paths in
- * book_moves.csv must therefore reference the POST-rename category names.
+ * Category moves reparent an existing category (books and subcategories follow).
+ * The destination parent must already exist (nothing is auto-created); moving a
+ * category under itself or its own descendant fails. Idempotent: once applied,
+ * the source path no longer resolves and the row is skipped.
+ *
+ * Order of operations: category renames → category moves → book renames → book
+ * moves. Paths in category_moves.csv and book_moves.csv must therefore reference
+ * the POST-rename category names, and book_moves paths the POST-move tree.
  * If a move references a pre-rename destPath, the task fails with a clear error.
  *
  * Usage:
@@ -57,6 +64,7 @@ private const val FOR_DB_ARCHIVE_NAME = "fordb_latest.zip"
 private const val FOR_DB_USER_AGENT = "SeforimLibrary-ForDBFetcher/1.0"
 internal val FOR_DB_CSV_FILES = mapOf(
     "categoryRenames" to "category_renames.csv",
+    "categoryMoves" to "category_moves.csv",
     "bookRenames" to "book_renames.csv",
     "bookMoves" to "book_moves.csv",
     "generations" to "generations.csv",
@@ -91,6 +99,8 @@ fun main(args: Array<String>) {
         )
     val bookMoves: List<BookMove> =
         parseBookMoves(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("bookMoves"), logger), logger)
+    val categoryMoves: List<CategoryMove> =
+        parseCategoryMoves(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryMoves"), logger), logger)
 
     try {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
@@ -110,6 +120,10 @@ fun main(args: Array<String>) {
                 result.rows()
             }
 
+            val categoriesMoved = runSection("Category moves", categoryMoves, logger) { move ->
+                applyCategoryMove(conn, move, logger)
+            }
+
             val booksRenamed = runSection("Book renames", bookRenames, logger) { (oldTitle, newTitle) ->
                 renameBookTitle(conn, oldTitle, newTitle, logger)
             }
@@ -118,7 +132,7 @@ fun main(args: Array<String>) {
 
             conn.commit()
             logger.i {
-                "Post-process done: categories renamed=$totalRenamed merged=$totalMerged; " +
+                "Post-process done: categories renamed=$totalRenamed merged=$totalMerged moved=$categoriesMoved; " +
                     "books renamed=$booksRenamed; books moved=$booksMoved"
             }
         }
@@ -269,6 +283,21 @@ private fun parseBookMoves(lines: List<String>, logger: Logger): List<BookMove> 
     return parseRequiredCsvRows(lines.drop(1), FOR_DB_CSV_FILES.getValue("bookMoves"), minFields = 3)
         .map { f -> BookMove(f[0], f[1], f[2]) }
         .also { logger.i { "Loaded ${it.size} book move rule(s)" } }
+}
+
+/**
+ * `Source path,Destination parent path` rows. Same header discipline as
+ * [parseBookMoves]: a missing or malformed header fails the task.
+ */
+internal fun parseCategoryMoves(lines: List<String>, logger: Logger): List<CategoryMove> {
+    val firstLower = lines.firstOrNull()?.lowercase()
+    val isHeader = firstLower != null && "source path" in firstLower && "destination parent path" in firstLower
+    require(isHeader) {
+        "${FOR_DB_CSV_FILES.getValue("categoryMoves")} must start with a header containing Source path and Destination parent path"
+    }
+    return parseRequiredCsvRows(lines.drop(1), FOR_DB_CSV_FILES.getValue("categoryMoves"), minFields = 2)
+        .map { f -> CategoryMove(f[0], f[1]) }
+        .also { logger.i { "Loaded ${it.size} category move rule(s)" } }
 }
 
 private fun <T> runSection(name: String, items: List<T>, logger: Logger, apply: (T) -> Int): Int {
@@ -494,6 +523,76 @@ private fun findBookIdsByTitle(conn: Connection, title: String): List<Long> =
     }
 
 private data class BookMove(val name: String, val sourcePath: String, val destPath: String)
+
+internal data class CategoryMove(val sourcePath: String, val destParentPath: String)
+
+/**
+ * Reparents the category at [CategoryMove.sourcePath] (books and subtree follow via
+ * parentId) under [CategoryMove.destParentPath], which must already exist. Subtree
+ * levels are shifted to match the new depth. Idempotent: a source path that no
+ * longer resolves but whose leaf already sits under the destination is skipped.
+ */
+internal fun applyCategoryMove(conn: Connection, move: CategoryMove, logger: Logger): Int {
+    val title = move.sourcePath.split('/').map { it.trim() }.filter { it.isNotEmpty() }.lastOrNull()
+        ?: error("Category move has an empty source path")
+    val destParentId = resolveCategoryPath(conn, move.destParentPath)
+        ?: error("Category move destination parent '${move.destParentPath}' not found for '${move.sourcePath}' (nothing is auto-created)")
+
+    val sourceId = resolveCategoryPath(conn, move.sourcePath)
+    if (sourceId == null) {
+        val existing = findCategoryByNameAndParent(conn, title, destParentId)
+        require(existing != null) { "Category move source '${move.sourcePath}' not found" }
+        logger.i { "Category move '${move.sourcePath}' already applied (id=$existing, dest=${move.destParentPath})" }
+        return 0
+    }
+    if (categoryParent(conn, sourceId) == destParentId) {
+        logger.i { "Category move '${move.sourcePath}' already applied (id=$sourceId, dest=${move.destParentPath})" }
+        return 0
+    }
+    require(findCategoryByNameAndParent(conn, title, destParentId) == null) {
+        "Category move '${move.sourcePath}': a category titled '$title' already exists under '${move.destParentPath}' (merge is not supported)"
+    }
+    // Walk up from the destination to reject a move under the category itself or its descendant.
+    var cursor: Long? = destParentId
+    while (cursor != null) {
+        require(cursor != sourceId) {
+            "Category move '${move.sourcePath}' would create a cycle: '${move.destParentPath}' is inside the moved category"
+        }
+        cursor = categoryParent(conn, cursor)
+    }
+
+    val delta = categoryLevel(conn, destParentId) + 1 - categoryLevel(conn, sourceId)
+    conn.prepareStatement("UPDATE category SET parentId = ? WHERE id = ?").use { stmt ->
+        stmt.setLong(1, destParentId)
+        stmt.setLong(2, sourceId)
+        stmt.executeUpdate()
+    }
+    if (delta != 0) {
+        conn.prepareStatement(
+            """
+            WITH RECURSIVE sub(id) AS (
+                SELECT ? UNION ALL SELECT c.id FROM category c JOIN sub ON c.parentId = sub.id
+            )
+            UPDATE category SET level = level + ? WHERE id IN (SELECT id FROM sub)
+            """.trimIndent(),
+        ).use { stmt ->
+            stmt.setLong(1, sourceId)
+            stmt.setInt(2, delta)
+            stmt.executeUpdate()
+        }
+    }
+    logger.i { "Moved category '${move.sourcePath}' (id=$sourceId) under '${move.destParentPath}' (parentId=$destParentId, level delta=$delta)" }
+    return 1
+}
+
+private fun categoryParent(conn: Connection, categoryId: Long): Long? =
+    conn.prepareStatement("SELECT parentId FROM category WHERE id = ?").use { stmt ->
+        stmt.setLong(1, categoryId)
+        stmt.executeQuery().use { rs ->
+            check(rs.next()) { "Category id=$categoryId not found" }
+            rs.getLong(1).let { if (rs.wasNull()) null else it }
+        }
+    }
 
 /**
  * Updates the matching book's categoryId. Source path must fully exist; the
