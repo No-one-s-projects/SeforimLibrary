@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookKey
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookSourceHash
 import io.github.kdroidfilter.seforimlibrary.common.changes.OtzariaSourceHashComputer
 import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
@@ -227,6 +228,17 @@ class DatabaseGenerator(
     // Book contents cache: maps library-relative key -> list of lines
     private val bookContentCache = mutableMapOf<String, List<String>>()
 
+    // ===== Companion-notes merge ('הערות על X' → inline footnotes) =====
+    // base title → (0-based base line → note lines in reading order)
+    private var hearotMergePlans: Map<String, Map<Int, List<String>>> = emptyMap()
+    // Companion books consumed by the merge — never imported as standalone books.
+    private var mergedHearotTitles: Set<String> = emptySet()
+    // base title → sha256(companion file ‖ links json), mixed into the base book's
+    // source hash so touched-book detection sees note-only edits.
+    private var hearotMergeExtraHash: Map<String, ByteArray> = emptyMap()
+    // Planned bases whose merge has not been applied yet — must drain to empty.
+    private val pendingHearotMergeBases = mutableSetOf<String>()
+
     // No-op kept for call-site compatibility. The IdAllocator (seeded from
     // build_state.db) now handles cross-build id continuation — see DELTA_UPDATE_PLAN.md §3.5.
     @Suppress("UnusedPrivateMember", "RedundantSuspendModifier")
@@ -296,6 +308,9 @@ class DatabaseGenerator(
                 // Save for relative path computations
                 libraryRoot = libraryPath
 
+                // Plan companion-notes merges before any book import
+                buildHearotMergePlans()
+
                 // Estimate total number of books (txt files) for progress tracking
                 totalBooksToProcess = try {
                     Files.walk(libraryRoot).use { s ->
@@ -316,6 +331,7 @@ class DatabaseGenerator(
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
+                assertAllHearotMergesApplied()
 
                 // Process links
                 processLinks()
@@ -373,6 +389,17 @@ class DatabaseGenerator(
                 // Load sources and create entries upfront
                 loadSourcesFromManifest()
 
+                val libraryPath = sourceDirectory.resolve("אוצריא")
+                if (!libraryPath.exists()) {
+                    throw IllegalStateException("The directory אוצריא does not exist in $sourceDirectory")
+                }
+                libraryRoot = libraryPath
+
+                // Plan companion-notes merges before hash detection and any import:
+                // merged notes change the base book's content, so its source hash
+                // must reflect the companion file and links json too.
+                buildHearotMergePlans()
+
                 // ─── Phase 2: touched-book detection ────────────────────────
                 // Runs after manifestSourcesByRel is loaded so the BookKey we
                 // emit matches what the importer will record below
@@ -388,7 +415,7 @@ class DatabaseGenerator(
                 }.getOrElse {
                     logger.w(it) { "Skipping Otzaria touched-book detection: ${it.message}" }
                     emptyMap()
-                }
+                }.let(::mixHearotMergeIntoSourceHashes)
                 run {
                     val prev = currentSourceHashes.keys
                         .mapNotNull { key -> allocator.previousSourceHash(key)?.let { key to it } }
@@ -401,11 +428,6 @@ class DatabaseGenerator(
 
                 precreateSourceEntries()
                 backfillAcronymsForExistingBooks()
-                val libraryPath = sourceDirectory.resolve("אוצריא")
-                if (!libraryPath.exists()) {
-                    throw IllegalStateException("The directory אוצריא does not exist in $sourceDirectory")
-                }
-                libraryRoot = libraryPath
 
                 totalBooksToProcess = try {
                     Files.walk(libraryRoot).use { s ->
@@ -420,6 +442,7 @@ class DatabaseGenerator(
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
+                assertAllHearotMergesApplied()
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
@@ -553,6 +576,190 @@ class DatabaseGenerator(
         }
         for ((k, v) in loaded) bookContentCache[k] = v
         logger.i { "Preloaded ${bookContentCache.size} books into RAM" }
+    }
+
+    /** Title of the book a link's path_2 points at (mirrors processLinksForBook). */
+    private fun linkTargetTitleOf(path2: String): String {
+        val last = if (path2.contains('\\')) path2.split('\\').last()
+        else Paths.get(path2).fileName.toString()
+        return last.substringBeforeLast('.', last)
+    }
+
+    private val headingLineRegex = Regex("^﻿?<h[1-6]", RegexOption.IGNORE_CASE)
+
+    /**
+     * Scans the links dir's `<base>_links.json` files for entries pointing at
+     * 'הערות על X' companion files and plans their inline merge into the base
+     * book (Havrouta hearot excluded — they feed the Talmud transitive-link
+     * pipeline). A pair is merged only when its mapping is complete: every
+     * non-blank, non-heading companion line is referenced by a link. Partial
+     * pairs stay on the standalone-book mechanism, loudly reported, until their
+     * links are completed upstream.
+     */
+    private suspend fun buildHearotMergePlans() {
+        hearotMergePlans = emptyMap()
+        mergedHearotTitles = emptySet()
+        hearotMergeExtraHash = emptyMap()
+        pendingHearotMergeBases.clear()
+        val linksDir = sourceDirectory.resolve("links")
+        if (!linksDir.exists()) return
+
+        // A title is usable for merging only when it resolves to exactly one file.
+        val filesByTitle = HashMap<String, Path?>()
+        Files.walk(libraryRoot).use { s ->
+            s.filter { Files.isRegularFile(it) && it.extension == "txt" }.forEach { p ->
+                val t = normalizeBookTitle(p.fileName.toString().substringBeforeLast('.'))
+                filesByTitle[t] = if (t in filesByTitle) null else p
+            }
+        }
+
+        fun resolveFile(title: String, reasons: MutableList<String>): Path? {
+            if (title !in filesByTitle) { reasons += "$title (file not found)"; return null }
+            val path = filesByTitle[title] ?: run { reasons += "$title (ambiguous filename)"; return null }
+            if (fileNameBlacklist.contains(path.fileName.toString())) { reasons += "$title (blacklisted file)"; return null }
+            if (sourceBlacklist.contains(getSourceNameFor(path))) { reasons += "$title (blacklisted source)"; return null }
+            return path
+        }
+
+        // Every reason for the pair to stay standalone is decided HERE, before any
+        // import — a plan must never fail mid-import (the companion's standalone
+        // import was already suppressed by then).
+        fun unmergeableNoteReason(note: String): String? = when {
+            note.isBlank() -> "linked blank note line"
+            note.contains("<i>") || note.contains("<i ") || note.contains("</i>") ->
+                "note with <i> markup (breaks the app's footnote regex)"
+            headingLineRegex.containsMatchIn(note) -> "linked heading note line"
+            else -> null
+        }
+
+        val plans = HashMap<String, MutableMap<Int, MutableList<String>>>()
+        val merged = mutableSetOf<String>()
+        val extra = HashMap<String, ByteArray>()
+        val standalone = mutableListOf<String>()
+        var mergedPairs = 0
+        var totalNotes = 0
+
+        val linkFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
+            .sortedBy { it.fileName.toString() }
+        for (jsonFile in linkFiles) {
+            val baseTitle = normalizeBookTitle(jsonFile.nameWithoutExtension.removeSuffix("_links"))
+            val jsonBytes = runCatching { Files.readAllBytes(jsonFile) }.getOrNull() ?: continue
+            val allEntries = parseLinksFromJson(jsonBytes.toString(Charsets.UTF_8), baseTitle)
+            val companionEntries = allEntries.filter {
+                HearotCompanionMerge.isMergeableCompanionTitle(
+                    normalizeBookTitle(linkTargetTitleOf(it.path_2))
+                )
+            }
+            if (companionEntries.isEmpty()) continue
+
+            val basePath = resolveFile(baseTitle, standalone) ?: continue
+            // A base the importer will skip must not consume its companion (M2):
+            // Sefaria-priority shadowing and root-level files never import.
+            val shadowing = repository.getBookByHeRef(baseTitle)
+            if (shadowing != null && repository.getSourceById(shadowing.sourceId)?.name == "Sefaria") {
+                standalone += "$baseTitle (base shadowed by a Sefaria book)"
+                continue
+            }
+            if (basePath.parent == libraryRoot) {
+                standalone += "$baseTitle (base file at library root is never imported)"
+                continue
+            }
+            val baseLines = basePath.readText(Charsets.UTF_8).lines()
+
+            val byHearot = companionEntries
+                .groupBy { normalizeBookTitle(linkTargetTitleOf(it.path_2)) }
+                .toSortedMap()
+            for ((hearotTitle, rawEntries) in byHearot) {
+                val hearotPath = resolveFile(hearotTitle, standalone) ?: continue
+                // Exact duplicate rows are packaging noise; drop them deterministically.
+                val entries = rawEntries.distinctBy { it.line_index_1 to it.line_index_2 }
+                if (entries.any { it.line_index_1_end != null || it.line_index_2_end != null }) {
+                    standalone += "$hearotTitle (ranged companion links)"
+                    continue
+                }
+                val hearotBytes = Files.readAllBytes(hearotPath)
+                val hearotLines = hearotBytes.toString(Charsets.UTF_8).lines()
+                if (entries.any {
+                        it.line_index_1.toInt() - 1 !in baseLines.indices ||
+                            it.line_index_2.toInt() - 1 !in hearotLines.indices
+                    }
+                ) {
+                    standalone += "$hearotTitle (companion links out of file range)"
+                    continue
+                }
+                val referenced = entries.map { it.line_index_2.toInt() - 1 }.toSet()
+                val unlinked = hearotLines.withIndex().count { (j, l) ->
+                    j !in referenced && l.isNotBlank() && !headingLineRegex.containsMatchIn(l)
+                }
+                if (unlinked > 0) {
+                    standalone += "$hearotTitle ($unlinked unlinked note lines)"
+                    continue
+                }
+                val badNote = referenced.firstNotNullOfOrNull { j -> unmergeableNoteReason(hearotLines[j]) }
+                if (badNote != null) {
+                    standalone += "$hearotTitle ($badNote)"
+                    continue
+                }
+                val noteLineIdxs = entries.map { it.line_index_1.toInt() - 1 }.toSet()
+                if (noteLineIdxs.any { baseLines[it].contains("class=\"footnote") }) {
+                    standalone += "$hearotTitle (base line already carries inline footnotes)"
+                    continue
+                }
+                // Word-anchored links measure raw offsets against the ORIGINAL line;
+                // an in-place merge would shift them (see buildLinkAnchor).
+                if (allEntries.any { it.start != null && it.line_index_1.toInt() - 1 in noteLineIdxs }) {
+                    standalone += "$hearotTitle (word-anchored links on note lines)"
+                    continue
+                }
+                val perLine = plans.getOrPut(baseTitle) { sortedMapOf() }
+                for (e in entries.sortedBy { it.line_index_2 }) {
+                    perLine.getOrPut(e.line_index_1.toInt() - 1) { mutableListOf() }
+                        .add(hearotLines[e.line_index_2.toInt() - 1])
+                }
+                merged += hearotTitle
+                mergedPairs++
+                totalNotes += entries.size
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                extra[baseTitle]?.let { md.update(it) }
+                md.update(hearotBytes)
+                md.update(jsonBytes)
+                extra[baseTitle] = md.digest()
+            }
+        }
+
+        hearotMergePlans = plans
+        mergedHearotTitles = merged
+        hearotMergeExtraHash = extra
+        pendingHearotMergeBases.addAll(plans.keys)
+        if (mergedPairs > 0 || standalone.isNotEmpty()) {
+            logger.i { "📝 Companion-notes merge plan: $mergedPairs pairs, $totalNotes notes → inline footnotes" }
+            standalone.forEach { logger.w { "📝 Companion notes stay standalone: $it" } }
+        }
+    }
+
+    /**
+     * Loud invariant: every planned merge was applied. An unapplied plan means a
+     * base book was skipped after its companion's import was already suppressed —
+     * the notes would silently vanish from the DB.
+     */
+    private fun assertAllHearotMergesApplied() {
+        check(pendingHearotMergeBases.isEmpty()) {
+            "companion-notes merge planned but never applied for: $pendingHearotMergeBases"
+        }
+    }
+
+    /** Folds each merged base's companion+json hash into its source hash. */
+    private fun mixHearotMergeIntoSourceHashes(
+        hashes: Map<BookKey, BookSourceHash>,
+    ): Map<BookKey, BookSourceHash> {
+        if (hearotMergeExtraHash.isEmpty() || hashes.isEmpty()) return hashes
+        return hashes.mapValues { (key, value) ->
+            val extra = hearotMergeExtraHash[key.canonicalHeTitle] ?: return@mapValues value
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            md.update(value.hash)
+            md.update(extra)
+            BookSourceHash(md.digest(), value.lastSeenVersion)
+        }
     }
 
     /**
@@ -711,6 +918,10 @@ class DatabaseGenerator(
                             logger.i { "⛔ Skipping blacklisted file '$fname' by name" }
                             continue
                         }
+                        if (normalizeBookTitle(fname.substringBeforeLast('.')) in mergedHearotTitles) {
+                            logger.i { "📝 Skipping '$fname' — merged into its base book as inline notes" }
+                            continue
+                        }
                         if (parentCategoryId == null) {
                             logger.w { "❌ Book found without category: $entry" }
                             continue
@@ -850,9 +1061,18 @@ class DatabaseGenerator(
 
         // Prefer preloaded content from RAM if available
         val key = toLibraryRelativeKey(path)
-        val lines = bookContentCache[key] ?: run {
+        val rawLines = bookContentCache[key] ?: run {
             val content = path.readText(Charsets.UTF_8)
             content.lines()
+        }
+        // Inject companion notes as inline footnotes when a merge plan exists
+        val plan = hearotMergePlans[bookTitle]
+        val lines = if (plan == null) rawLines else {
+            val stats = HearotCompanionMerge.MergeStats()
+            HearotCompanionMerge.mergeLines(bookTitle, rawLines, plan, stats).also {
+                pendingHearotMergeBases.remove(bookTitle)
+                logger.i { "📝 '$bookTitle': merged companion notes — ${stats.inPlace} anchored in place, ${stats.appended} appended" }
+            }
         }
         logger.i { "Number of lines: ${lines.size}" }
 
@@ -915,7 +1135,8 @@ class DatabaseGenerator(
         // PREMIÈRE PASSE : Créer toutes les entrées et lignes
         for ((lineIndex, line) in lines.withIndex()) {
             val level = detectHeaderLevel(line)
-            val plainText = if (level > 0) cleanHtml(line) else ""
+            // Merged footnotes on a heading line must not leak into the TOC text
+            val plainText = if (level > 0) cleanHtml(HearotCompanionMerge.stripFootnotes(line)) else ""
             val lineCharCount = countVisibleChars(line)
 
             if (level > 0) {
@@ -1114,6 +1335,10 @@ class DatabaseGenerator(
             // Skip files explicitly blacklisted by name
             if (fileNameBlacklist.contains(bookFileName)) {
                 logger.i { "⛔ Skipping blacklisted file in priority list: $bookFileName" }
+                continue@outer
+            }
+            if (normalizeBookTitle(bookFileName.substringBeforeLast('.')) in mergedHearotTitles) {
+                logger.i { "📝 Skipping priority entry '$bookFileName' — merged into its base book" }
                 continue@outer
             }
 
@@ -1346,8 +1571,13 @@ class DatabaseGenerator(
 
                 val targetBook = booksByTitle[targetTitle]
                 if (targetBook == null) {
-                    logger.i { "Link ${index + 1}/${links.size} - Target book not found: $targetTitle" }
-                    logger.i { "Original path: ${linkData.path_2}" }
+                    // Companion notes merged into their base have no book — expected
+                    if (HearotCompanionMerge.isMergeableCompanionTitle(normalizeBookTitle(targetTitle))) {
+                        logger.d { "Skipping link into merged companion notes: $targetTitle" }
+                    } else {
+                        logger.i { "Link ${index + 1}/${links.size} - Target book not found: $targetTitle" }
+                        logger.i { "Original path: ${linkData.path_2}" }
+                    }
                     continue
                 }
 

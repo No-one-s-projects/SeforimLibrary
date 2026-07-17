@@ -1,0 +1,127 @@
+package io.github.kdroidfilter.seforimlibrary.otzariasqlite
+
+/**
+ * Merges 'הערות על X' companion-note files into the base book's lines as inline
+ * footnotes — `<sup class="footnote-marker">N</sup><i class="footnote">body</i>`,
+ * the same idiom Sefaria books use and the app's virtual 'הערות' pane renders.
+ *
+ * A note whose leading marker matches a marker in the base line is injected in
+ * place of that marker; each note consumes the leftmost unconsumed occurrence
+ * (footnote numbering restarts between sections, so the same number can appear
+ * twice in one line and map to two different notes). Notes that cannot be
+ * anchored are appended whole at the end of the line — text is never dropped.
+ */
+internal object HearotCompanionMerge {
+
+    const val COMPANION_PREFIX = "הערות על "
+    private const val HAVROUTA_PREFIX = "הערות על חברותא"
+
+    /** Havrouta hearot stay standalone: they feed the Talmud transitive-link pipeline. */
+    fun isMergeableCompanionTitle(title: String): Boolean =
+        title.startsWith(COMPANION_PREFIX) && !title.startsWith(HAVROUTA_PREFIX)
+
+    class MergeStats {
+        var inPlace: Int = 0
+        var appended: Int = 0
+    }
+
+    // Leading-marker grammars observed in the library, tried in order:
+    // <small><sup>N</sup> body</small> | <sup [attrs]>N</sup> body | "N body"
+    private val NOTE_SMALL_SUP = Regex("""^﻿?<small><sup>([^<]+)</sup>\s*""")
+    private val NOTE_SUP = Regex("""^﻿?<sup(?:\s[^>]*)?>([^<]+)</sup>\s*""")
+    private val NOTE_BARE_NUMBER = Regex("""^﻿?(\d+)\s+""")
+
+    private val FOOTNOTE_BODY =
+        Regex("""<i\s+class="footnote">.*?</i>""", RegexOption.DOT_MATCHES_ALL)
+    private val FOOTNOTE_MARKER =
+        Regex("""<sup\s+class="footnote-marker">.*?</sup>""", RegexOption.DOT_MATCHES_ALL)
+
+    /** Strips merged markers+bodies; keeps TOC text of heading lines clean. */
+    fun stripFootnotes(line: String): String {
+        if (!line.contains("footnote")) return line
+        return line.replace(FOOTNOTE_BODY, "").replace(FOOTNOTE_MARKER, "")
+    }
+
+    /**
+     * Returns [baseLines] with [notesByLine] (0-based base line → note lines in
+     * reading order) injected. Line count is always preserved.
+     */
+    fun mergeLines(
+        bookTitle: String,
+        baseLines: List<String>,
+        notesByLine: Map<Int, List<String>>,
+        stats: MergeStats = MergeStats(),
+    ): List<String> {
+        if (notesByLine.isEmpty()) return baseLines
+        val out = baseLines.toMutableList()
+        for ((lineIdx, notes) in notesByLine.toSortedMap()) {
+            check(lineIdx in out.indices) {
+                "hearot merge for '$bookTitle': base line $lineIdx out of range (${out.size} lines)"
+            }
+            val original = out[lineIdx]
+            check(!original.contains("class=\"footnote")) {
+                "hearot merge for '$bookTitle': base line $lineIdx already carries inline footnotes"
+            }
+            val consumed = mutableListOf<IntRange>()
+            val placements = mutableListOf<Pair<IntRange, String>>()
+            val appendix = StringBuilder()
+            for (note in notes) {
+                check(note.isNotBlank()) { "hearot merge for '$bookTitle': blank note for line $lineIdx" }
+                check(!note.contains("<i>") && !note.contains("<i ") && !note.contains("</i>")) {
+                    "hearot merge for '$bookTitle': note carries <i> markup, which breaks the " +
+                        "app's footnote regex (first </i> ends the body): ${note.take(80)}"
+                }
+                val parsed = parseLeadingMarker(note)
+                val anchor = parsed?.let { findAnchor(original, it.first, consumed) }
+                if (parsed != null && anchor != null) {
+                    consumed += anchor
+                    placements += anchor to
+                        "<sup class=\"footnote-marker\">${parsed.first}</sup><i class=\"footnote\">${parsed.second}</i>"
+                    stats.inPlace++
+                } else {
+                    appendix.append("<i class=\"footnote\">").append(note.removePrefix("﻿")).append("</i>")
+                    stats.appended++
+                }
+            }
+            var line = original
+            for ((range, html) in placements.sortedByDescending { it.first.first }) {
+                line = line.substring(0, range.first) + html + line.substring(range.last + 1)
+            }
+            out[lineIdx] = line + appendix
+        }
+        return out
+    }
+
+    /** (marker token, body) when the note opens with a recognized marker, else null. */
+    private fun parseLeadingMarker(note: String): Pair<String, String>? {
+        NOTE_SMALL_SUP.find(note)?.let { m ->
+            val rest = note.substring(m.value.length).trimEnd()
+            // The whole note is wrapped in <small>…</small>; unwrap both ends.
+            if (rest.endsWith("</small>")) {
+                return m.groupValues[1] to rest.removeSuffix("</small>").trimEnd()
+            }
+            return null
+        }
+        NOTE_SUP.find(note)?.let { return it.groupValues[1] to note.substring(it.value.length) }
+        NOTE_BARE_NUMBER.find(note)?.let { return it.groupValues[1] to note.substring(it.value.length) }
+        return null
+    }
+
+    /**
+     * Leftmost unconsumed marker in the base line matching [token]:
+     * `<sup>N</sup>`, attribute-carrying `<sup …>N</sup>`, or `<small …>N</small>`.
+     */
+    private fun findAnchor(line: String, token: String, consumed: List<IntRange>): IntRange? {
+        val esc = Regex.escape(token)
+        val patterns = listOf(
+            Regex("<sup>$esc</sup>"),
+            Regex("<sup\\s[^>]*>$esc</sup>"),
+            Regex("<small\\s[^>]*>\\s*$esc\\s*</small>"),
+        )
+        // Leftmost across ALL grammars — a line may mix marker styles.
+        return patterns
+            .flatMap { it.findAll(line).map(MatchResult::range) }
+            .filter { r -> consumed.none { it.first <= r.last && r.first <= it.last } }
+            .minByOrNull { it.first }
+    }
+}
