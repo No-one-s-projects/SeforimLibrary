@@ -357,10 +357,10 @@ class SefariaLinksImporterTest {
         assertEquals(ConnectionType.COMMENTARY, result)
     }
 
-    // Daf-style refs have no parseable numeric top level, so the gate never fires
-    // — protects Talmud commentaries from being wrongly demoted.
+    // Daf-style refs compare only when the pair proved daf-aligned in the typed-row
+    // pre-scan; without that proof the gate never fires (protects Rif-paginated books).
     @Test
-    fun blankDafStyleRefIsNotDemoted() {
+    fun blankDafStyleRefIsNotDemotedWithoutAlignmentProof() {
         val talmudMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
         val tosafotMeta = BookMeta(
             isBaseBook = false, categoryLevel = 2, priorityRank = null,
@@ -372,6 +372,110 @@ class SefariaLinksImporterTest {
             srcMeta = talmudMeta, tgtMeta = tosafotMeta,
             srcRef = "Shabbat 4b:3",
             tgtRef = "Tosafot on Shabbat 2a:1:1",
+        )
+
+        assertEquals(ConnectionType.COMMENTARY, result)
+    }
+
+    // Real-world bug (screenshot: Rashi on Niddah 4b listed under Niddah 11a): a
+    // blank-typed in-text citation ("לקמן נדה יא.") crosses dapim. Once the pair is
+    // proven daf-aligned, the mismatch (4b ≠ 11a) must demote it to REFERENCE.
+    @Test
+    fun blankCrossDafCitationIsDemotedForAlignedPair() {
+        val talmudMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
+        val rashiMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+        )
+
+        val result = inferBlankConnectionType(
+            srcBookId = 10L, tgtBookId = 20L,
+            srcMeta = talmudMeta, tgtMeta = rashiMeta,
+            srcRef = "Niddah 11a:7",
+            tgtRef = "Rashi on Niddah 4b:11:1",
+            dafAlignedPairs = setOf(20L to 10L),
+        )
+
+        assertEquals(ConnectionType.REFERENCE, result)
+    }
+
+    // Same daf on both sides of an aligned pair → genuine home commentary, kept.
+    @Test
+    fun blankSameDafCommentaryIsKeptForAlignedPair() {
+        val talmudMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
+        val rashiMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+        )
+
+        val result = inferBlankConnectionType(
+            srcBookId = 10L, tgtBookId = 20L,
+            srcMeta = talmudMeta, tgtMeta = rashiMeta,
+            srcRef = "Niddah 11a:7",
+            tgtRef = "Rashi on Niddah 11a:7:1",
+            dafAlignedPairs = setOf(20L to 10L),
+        )
+
+        assertEquals(ConnectionType.COMMENTARY, result)
+    }
+
+    // A ranged base citation ("Niddah 11a:7-9") still exposes its top daf ("11a") —
+    // the Rashash-on-2a case from the bug report must demote too.
+    @Test
+    fun blankRangedBaseCitationIsDemotedForAlignedPair() {
+        val talmudMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
+        val rashashMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+        )
+
+        val result = inferBlankConnectionType(
+            srcBookId = 10L, tgtBookId = 20L,
+            srcMeta = talmudMeta, tgtMeta = rashashMeta,
+            srcRef = "Niddah 11a:7-9",
+            tgtRef = "Rashash on Niddah 2a:4",
+            dafAlignedPairs = setOf(20L to 10L),
+        )
+
+        assertEquals(ConnectionType.REFERENCE, result)
+    }
+
+    // Cross-daf blank row for a NON-aligned pair (Rif pagination: its dapim never
+    // match the Bavli's) must keep the schema promotion — not demote.
+    @Test
+    fun blankCrossDafKeptForRifPaginatedPair() {
+        val talmudMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
+        val rifMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+        )
+
+        val result = inferBlankConnectionType(
+            srcBookId = 10L, tgtBookId = 20L,
+            srcMeta = talmudMeta, tgtMeta = rifMeta,
+            srcRef = "Shabbat 119a:2",
+            tgtRef = "Rif Shabbat 44a:1",
+            dafAlignedPairs = setOf(99L to 98L),
+        )
+
+        assertEquals(ConnectionType.COMMENTARY, result)
+    }
+
+    // A dashed daf-range token ("2a-2b") is not a comparable daf address — kept.
+    @Test
+    fun blankDashedDafRangeIsNotComparable() {
+        val talmudMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0)
+        val tosafotMeta = BookMeta(
+            isBaseBook = false, categoryLevel = 2, priorityRank = null,
+            dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+        )
+
+        val result = inferBlankConnectionType(
+            srcBookId = 10L, tgtBookId = 20L,
+            srcMeta = talmudMeta, tgtMeta = tosafotMeta,
+            srcRef = "Shabbat 2a-2b",
+            tgtRef = "Tosafot on Shabbat 4a:1:1",
+            dafAlignedPairs = setOf(20L to 10L),
         )
 
         assertEquals(ConnectionType.COMMENTARY, result)
@@ -496,5 +600,27 @@ class SefariaLinksImporterTest {
         assertNull(topLevelStructuralIndex("Shabbat 2a"))
         assertNull(topLevelStructuralIndex("Shabbat 2a:5"))
         assertNull(topLevelStructuralIndex("Genesis"))
+    }
+
+    // ───── topLevelAddressToken + DAF_TOKEN_REGEX ─────
+
+    @Test
+    fun topLevelAddressTokenParsing() {
+        assertEquals("302", topLevelAddressToken("Magen Avraham 302:6"))
+        assertEquals("2a", topLevelAddressToken("Shabbat 2a"))
+        assertEquals("2a", topLevelAddressToken("Shabbat 2a:5"))
+        assertEquals("11a", topLevelAddressToken("Niddah 11a:7-9"))
+        assertEquals("2a-2b", topLevelAddressToken("Berakhot 2a-2b"))
+        assertEquals("Genesis", topLevelAddressToken("Genesis"))
+    }
+
+    @Test
+    fun dafTokenRegexMatchesOnlyDafAmud() {
+        assertTrue("2a".matches(DAF_TOKEN_REGEX))
+        assertTrue("104b".matches(DAF_TOKEN_REGEX))
+        assertTrue(!"2a-2b".matches(DAF_TOKEN_REGEX))
+        assertTrue(!"302".matches(DAF_TOKEN_REGEX))
+        assertTrue(!"2c".matches(DAF_TOKEN_REGEX))
+        assertTrue(!"Genesis".matches(DAF_TOKEN_REGEX))
     }
 }

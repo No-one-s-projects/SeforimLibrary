@@ -82,6 +82,16 @@ internal class SefariaLinksImporter(
 
         logger.i { "Processing ${csvFiles.size} link files..." }
 
+        // Pre-scan: which (dependant, base) pairs have daf-aligned addressing.
+        val dafAlignedPairs = computeDafAlignedBookPairs(
+            csvFiles = csvFiles,
+            refsByCanonical = refsByCanonical,
+            refsByBase = refsByBase,
+            lineKeyToId = lineKeyToId,
+            lineIdToBookId = lineIdToBookId,
+            bookMetaById = bookMetaById,
+        )
+
         // Channel for collecting links from parallel processors
         val linkChannel = Channel<Link>(Channel.BUFFERED)
 
@@ -98,7 +108,8 @@ internal class SefariaLinksImporter(
                     headingLineIds = headingLineIds,
                     linkChannel = linkChannel,
                     charLevelPending = charLevelPending,
-                    refsByPath = refsByPath
+                    refsByPath = refsByPath,
+                    dafAlignedPairs = dafAlignedPairs
                 )
             }
         }
@@ -133,6 +144,83 @@ internal class SefariaLinksImporter(
         // Ranges/coverage reference link ids, so they are inserted only after
         // every link row exists.
         insertPendingRangesAndCoverage()
+    }
+
+    /**
+     * Pre-scan of the explicitly-typed `commentary` rows: a (dependant, base) book pair
+     * is "daf-aligned" when the majority of its typed daf-vs-daf rows carry the SAME
+     * top-level daf on both sides. Only aligned pairs are eligible for the blank-row
+     * daf gate in [inferBlankConnectionType] — books with their own pagination (Rif,
+     * Baal HaMaor, Milchamot) never reach a same-daf majority and stay exempt.
+     */
+    private suspend fun computeDafAlignedBookPairs(
+        csvFiles: List<Path>,
+        refsByCanonical: Map<String, List<RefEntry>>,
+        refsByBase: Map<String, RefEntry>,
+        lineKeyToId: Map<Pair<String, Int>, Long>,
+        lineIdToBookId: Map<Long, Long>,
+        bookMetaById: Map<Long, BookMeta>,
+    ): Set<Pair<Long, Long>> = coroutineScope {
+        val equalByPair = ConcurrentHashMap<Pair<Long, Long>, LongAdder>()
+        val differByPair = ConcurrentHashMap<Pair<Long, Long>, LongAdder>()
+        csvFiles.map { file ->
+            launch(Dispatchers.IO) {
+                Files.newBufferedReader(file).use { reader ->
+                    val iter = reader.lineSequence().iterator()
+                    if (!iter.hasNext()) return@use
+                    val headers = parseCsvLine(iter.next()).map { normalizeCitation(it) }
+                    val idxC1 = headers.indexOf("Citation 1")
+                    val idxC2 = headers.indexOf("Citation 2")
+                    val idxConn = headers.indexOf("Conection Type")
+                    // Malformed headers fail loudly in the main pass; nothing to scan here.
+                    if (idxC1 < 0 || idxC2 < 0 || idxConn < 0) return@use
+                    while (iter.hasNext()) {
+                        val row = parseCsvLine(iter.next())
+                        if (row.isEmpty()) continue
+                        val conn = row.getOrNull(idxConn)?.trim().orEmpty()
+                        if (!conn.equals("commentary", ignoreCase = true)) continue
+                        val c1 = normalizeCitation(row.getOrNull(idxC1).orEmpty())
+                        val c2 = normalizeCitation(row.getOrNull(idxC2).orEmpty())
+                        if (c1.isEmpty() || c2.isEmpty()) continue
+                        val tok1 = topLevelAddressToken(c1)
+                        val tok2 = topLevelAddressToken(c2)
+                        if (!tok1.matches(DAF_TOKEN_REGEX) || !tok2.matches(DAF_TOKEN_REGEX)) continue
+                        for (from in resolveRefs(c1, refsByCanonical, refsByBase)) {
+                            for (to in resolveRefs(c2, refsByCanonical, refsByBase)) {
+                                val srcLine = lineKeyToId[from.path to (from.lineIndex - 1)] ?: continue
+                                val tgtLine = lineKeyToId[to.path to (to.lineIndex - 1)] ?: continue
+                                val srcBookId = lineIdToBookId[srcLine] ?: continue
+                                val tgtBookId = lineIdToBookId[tgtLine] ?: continue
+                                val srcMeta = bookMetaById[srcBookId]
+                                val tgtMeta = bookMetaById[tgtBookId]
+                                val tgtDependsOnSrc = tgtMeta != null && srcBookId in tgtMeta.baseTextBookIds
+                                val srcDependsOnTgt = srcMeta != null && tgtBookId in srcMeta.baseTextBookIds
+                                // Same orientation rule as the gate: exactly one dependant side.
+                                if (tgtDependsOnSrc == srcDependsOnTgt) continue
+                                val (pair, depTok, baseTok) = if (tgtDependsOnSrc) {
+                                    Triple(tgtBookId to srcBookId, tok2, tok1)
+                                } else {
+                                    Triple(srcBookId to tgtBookId, tok1, tok2)
+                                }
+                                (if (depTok == baseTok) equalByPair else differByPair)
+                                    .computeIfAbsent(pair) { LongAdder() }.increment()
+                            }
+                        }
+                    }
+                }
+            }
+        }.joinAll()
+        val aligned = buildSet {
+            for ((pair, eq) in equalByPair) {
+                if (eq.sum() > (differByPair[pair]?.sum() ?: 0L)) add(pair)
+            }
+        }
+        logger.i {
+            val scanned = (equalByPair.keys + differByPair.keys).size
+            "Daf-alignment pre-scan: $scanned pairs with typed daf-daf rows, " +
+                "${aligned.size} aligned (blank-row daf gate ON), ${scanned - aligned.size} exempt"
+        }
+        aligned
     }
 
     private suspend fun insertPendingRangesAndCoverage() {
@@ -214,7 +302,8 @@ internal class SefariaLinksImporter(
         headingLineIds: Set<Long>,
         linkChannel: Channel<Link>,
         charLevelPending: Queue<PendingCharLevelAnchor>? = null,
-        refsByPath: Map<String, List<RefEntry>> = emptyMap()
+        refsByPath: Map<String, List<RefEntry>> = emptyMap(),
+        dafAlignedPairs: Set<Pair<Long, Long>> = emptySet()
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
@@ -317,6 +406,7 @@ internal class SefariaLinksImporter(
                                 tgtMeta = bookMetaById[tgtBookId],
                                 srcRef = c1,
                                 tgtRef = c2,
+                                dafAlignedPairs = dafAlignedPairs,
                             ) ?: csvConnectionType
                         } else {
                             csvConnectionType
@@ -916,9 +1006,13 @@ internal fun inferConnectionTypeFromSchema(
  * Genuine commentary links are explicitly typed `commentary` in Sefaria and never reach
  * this path — only blank-typed links do. So we keep the oriented promotion only when the
  * dependant segment's top-level structural address (siman / perek) matches the base
- * segment it points at; otherwise the link is a [ConnectionType.REFERENCE]. Refs without
- * a parseable numeric top level (whole-book citations, daf-style `2a`) are left as
- * inferred — the gate only fires on a confident mismatch.
+ * segment it points at; otherwise the link is a [ConnectionType.REFERENCE].
+ *
+ * Daf-style tokens (`4b` vs `11a`) are compared only when [dafAlignedPairs] contains the
+ * (dependant, base) book pair — i.e. the pair's explicitly-typed commentary rows proved
+ * same-daf addressing. Books with their own pagination (Rif, Baal HaMaor, Milchamot —
+ * whose dapim never match the Bavli's) never pass that pre-scan and stay exempt, as do
+ * refs without a comparable top level (whole-book citations, mixed schemes).
  */
 internal fun inferBlankConnectionType(
     srcBookId: Long,
@@ -927,6 +1021,7 @@ internal fun inferBlankConnectionType(
     tgtMeta: BookMeta?,
     srcRef: String,
     tgtRef: String,
+    dafAlignedPairs: Set<Pair<Long, Long>> = emptySet(),
 ): ConnectionType? {
     val inferred = inferConnectionTypeFromSchema(srcBookId, tgtBookId, srcMeta, tgtMeta)
         ?: return null
@@ -937,29 +1032,43 @@ internal fun inferBlankConnectionType(
     val targetDependsOnSource = tgtMeta != null && srcBookId in tgtMeta.baseTextBookIds
     val dependantRef = if (targetDependsOnSource) tgtRef else srcRef
     val baseRef = if (targetDependsOnSource) srcRef else tgtRef
+    val dependantBookId = if (targetDependsOnSource) tgtBookId else srcBookId
+    val baseBookId = if (targetDependsOnSource) srcBookId else tgtBookId
 
-    val dependantTop = topLevelStructuralIndex(dependantRef)
-    val baseTop = topLevelStructuralIndex(baseRef)
-    return if (dependantTop != null && baseTop != null && dependantTop != baseTop) {
-        ConnectionType.REFERENCE
-    } else {
-        inferred
+    val dependantTok = topLevelAddressToken(dependantRef)
+    val baseTok = topLevelAddressToken(baseRef)
+
+    val dependantNum = dependantTok.toIntOrNull()
+    val baseNum = baseTok.toIntOrNull()
+    if (dependantNum != null && baseNum != null) {
+        return if (dependantNum != baseNum) ConnectionType.REFERENCE else inferred
     }
+
+    // Daf-vs-daf: comparable only for pairs whose typed rows proved daf alignment.
+    if (dependantTok.matches(DAF_TOKEN_REGEX) && baseTok.matches(DAF_TOKEN_REGEX) &&
+        (dependantBookId to baseBookId) in dafAlignedPairs
+    ) {
+        return if (dependantTok != baseTok) ConnectionType.REFERENCE else inferred
+    }
+    return inferred
 }
 
 /**
- * Leading (top-level) numeric index of a Sefaria reference — the top component of its
- * trailing address run, parsed from the end so textual title parts are skipped.
- * `Magen Avraham 302:6` → 302; `Shulchan Arukh, Orach Chayim 323:6` → 323;
- * `Rashi on Genesis 1:1:1` → 1. Returns null when the top component is not purely
- * numeric — whole-book refs (`Genesis`) and daf-style refs (`Shabbat 2a`) — so such
- * links are never demoted by the structural gate.
+ * Top component of a Sefaria reference's trailing address run, parsed from the end so
+ * textual title parts are skipped. `Magen Avraham 302:6` → "302"; `Shabbat 2a:5` → "2a";
+ * `Genesis` → "Genesis" (callers detect non-address tokens via numeric/daf checks).
  */
-internal fun topLevelStructuralIndex(ref: String): Int? =
+internal fun topLevelAddressToken(ref: String): String =
     ref.trim()
         .substringAfterLast(' ') // address portion, e.g. "302:6" / "2a:5"
         .substringBefore(':') // top-level component, e.g. "302" / "2a"
-        .toIntOrNull()
+
+/** Numeric form of [topLevelAddressToken]; null for whole-book / daf-style refs. */
+internal fun topLevelStructuralIndex(ref: String): Int? =
+    topLevelAddressToken(ref).toIntOrNull()
+
+// Talmud daf-amud address token ("2a", "104b"). Dashed ranges ("2a-2b") don't match.
+internal val DAF_TOKEN_REGEX = Regex("^[0-9]+[ab]$")
 
 private val ORIENTED_DEPENDANT_TYPES = setOf(
     ConnectionType.COMMENTARY,
