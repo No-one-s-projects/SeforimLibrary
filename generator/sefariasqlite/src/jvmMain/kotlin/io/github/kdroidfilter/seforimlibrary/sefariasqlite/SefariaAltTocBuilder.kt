@@ -22,7 +22,14 @@ internal class SefariaAltTocBuilder(
         lineKeyToId: Map<Pair<String, Int>, Long>,
         totalLines: Int
     ): Boolean {
-        if (payload.altStructures.isEmpty()) return false
+        if (payload.altStructures.isEmpty()) {
+            // These midrashim ship no alt-struct and their siman level is a
+            // flattened leaf; synthesize a siman alt-TOC (alt_toc rows only).
+            if (isSimanAltTocBook(payload)) {
+                return buildSynthesizedSimanimAltToc(payload, bookId, bookPath, lineKeyToId, totalLines)
+            }
+            return false
+        }
 
         var hasGeneratedAltStructures = false
 
@@ -268,12 +275,15 @@ internal class SefariaAltTocBuilder(
 
             fun buildChildLabel(base: String?, idx: Int, addressValue: Int?, addressType: String?): String {
                 val numericValue = (addressValue ?: (idx + 1)).coerceAtLeast(1)
+                val hebBase = mapBaseToHebrew(base)
+                if (hebBase == ALIYAH_SECTION_LABEL) {
+                    aliyahOrdinalLabel(numericValue)?.let { return it }
+                }
                 val suffix = if (addressType.equals("Talmud", ignoreCase = true)) {
                     toDaf(numericValue)
                 } else {
                     toGematria(numericValue)
                 }
-                val hebBase = mapBaseToHebrew(base)
                 val cleanBase = hebBase?.takeIf { it.isNotBlank() }
                 return cleanBase?.let { "$it $suffix" } ?: suffix
             }
@@ -294,6 +304,10 @@ internal class SefariaAltTocBuilder(
                 val addrValue = computeAddressValue(node, 0)
                 val base = mapBaseToHebrew(node.childLabel)
                     ?: if (addressType.equals("Talmud", ignoreCase = true)) "דף" else null
+                if (base == ALIYAH_SECTION_LABEL) {
+                    val aliyahIndex = addrValue ?: position?.plus(1) ?: 1
+                    aliyahOrdinalLabel(aliyahIndex)?.let { return it }
+                }
                 val suffix = when {
                     addrValue != null && addressType.equals("Talmud", ignoreCase = true) -> toDaf(addrValue)
                     addrValue != null -> toGematria(addrValue)
@@ -553,11 +567,157 @@ internal class SefariaAltTocBuilder(
         return hasGeneratedAltStructures
     }
 
+    /** Curated midrashim whose innermost siman level is flattened; exact title. */
+    private fun isSimanAltTocBook(payload: BookPayload): Boolean {
+        normalizeTitleKey(payload.enTitle)?.let { if (it in SIMAN_ALTTOC_EN_KEYS) return true }
+        normalizeTitleKey(payload.heTitle)?.let { if (it in SIMAN_ALTTOC_HE_KEYS) return true }
+        return false
+    }
+
+    /** Mirror the parasha heading tree as alt-TOC containers and hang each siman
+     *  leaf under its parasha, labelled by ordinal gematria. Writes alt_toc only. */
+    private suspend fun buildSynthesizedSimanimAltToc(
+        payload: BookPayload,
+        bookId: Long,
+        bookPath: String,
+        lineKeyToId: Map<Pair<String, Int>, Long>,
+        totalLines: Int
+    ): Boolean {
+        // Phase 1: resolve to lines; bail if there is no siman to add.
+        val sectionHeadings = payload.headings
+            .filter { it.level >= 1 } // drop the book-title <h1> (level 0)
+            .sortedBy { it.lineIndex }
+        if (sectionHeadings.isEmpty() || payload.refEntries.isEmpty()) return false
+
+        // Ascending list of heading line indices whose lines actually exist.
+        val headingLines = sectionHeadings
+            .filter { lineKeyToId.containsKey(bookPath to it.lineIndex) }
+            .map { it.lineIndex }
+            .sorted()
+        if (headingLines.isEmpty()) return false
+
+        // Each leaf → (its 0-based lineIndex, the nearest preceding heading line).
+        val leaves = payload.refEntries
+            .sortedBy { it.lineIndex }
+            .mapNotNull { entry ->
+                val lineIndex0 = entry.lineIndex - 1
+                if (!lineKeyToId.containsKey(bookPath to lineIndex0)) return@mapNotNull null
+                val parentLine = headingLines.lastOrNull { it <= lineIndex0 } ?: return@mapNotNull null
+                if (parentLine == lineIndex0) return@mapNotNull null // headings carry no leaf ref
+                lineIndex0 to parentLine
+            }
+        if (leaves.isEmpty()) return false
+
+        // Phase 2: write the structure, the heading mirror, then the simanim.
+        val structureId = bindings.upsertAltTocStructureStable(
+            AltTocStructure(
+                bookId = bookId,
+                key = SIMANIM_STRUCTURE_KEY,
+                title = SIMANIM_STRUCTURE_TITLE_EN,
+                heTitle = SIMANIM_STRUCTURE_TITLE_HE
+            )
+        )
+
+        val headingByLine = HashMap<Int, Pair<Long, Int>>()          // headingLine -> (tocId, altLevel)
+        val childrenByParent = LinkedHashMap<Long?, MutableList<Long>>()
+        val lineToTocId = HashMap<Int, Long>()                       // any owning line -> its tocId
+        val stack = ArrayDeque<Triple<Int, Long, Int>>()             // (headingLevel, tocId, altLevel)
+
+        for (h in sectionHeadings) {
+            val lineId = lineKeyToId[bookPath to h.lineIndex] ?: continue
+            while (stack.isNotEmpty() && stack.last().first >= h.level) stack.removeLast()
+            val parentId = stack.lastOrNull()?.second
+            val altLevel = stack.size
+            val tocId = repository.insertAltTocEntry(
+                AltTocEntry(
+                    structureId = structureId,
+                    parentId = parentId,
+                    textId = bindings.upsertTocText(h.title),
+                    text = h.title,
+                    level = altLevel,
+                    lineId = lineId,
+                    isLastChild = false,
+                    hasChildren = false
+                )
+            )
+            stack.addLast(Triple(h.level, tocId, altLevel))
+            headingByLine[h.lineIndex] = tocId to altLevel
+            childrenByParent.getOrPut(parentId) { mutableListOf() }.add(tocId)
+            lineToTocId[h.lineIndex] = tocId
+        }
+
+        val simanOrdinalByParent = HashMap<Long, Int>()
+        for ((lineIndex0, parentLine) in leaves) {
+            val lineId = lineKeyToId[bookPath to lineIndex0] ?: continue
+            val (parentTocId, parentAltLevel) = headingByLine[parentLine] ?: continue
+            val ordinal = (simanOrdinalByParent[parentTocId] ?: 0) + 1
+            simanOrdinalByParent[parentTocId] = ordinal
+            val label = toGematria(ordinal)
+            val childTocId = repository.insertAltTocEntry(
+                AltTocEntry(
+                    structureId = structureId,
+                    parentId = parentTocId,
+                    textId = bindings.upsertTocText(label),
+                    text = label,
+                    level = parentAltLevel + 1,
+                    lineId = lineId,
+                    isLastChild = false,
+                    hasChildren = false
+                )
+            )
+            childrenByParent.getOrPut(parentTocId) { mutableListOf() }.add(childTocId)
+            lineToTocId[lineIndex0] = childTocId
+        }
+
+        // hasChildren + isLastChild bookkeeping per sibling group.
+        for ((parentId, children) in childrenByParent) {
+            if (children.isEmpty()) continue
+            if (parentId != null) repository.updateAltTocEntryHasChildren(parentId, true)
+            repository.updateAltTocEntryIsLastChild(children.last(), true)
+        }
+
+        // line_alt_toc: map every content line to its nearest preceding entry.
+        val ownerLines = lineToTocId.keys.sorted()
+        var oi = 0
+        var currentTocId: Long? = null
+        for (lineIdx in 0 until totalLines) {
+            while (oi < ownerLines.size && ownerLines[oi] <= lineIdx) {
+                currentTocId = lineToTocId[ownerLines[oi]]
+                oi++
+            }
+            val tocId = currentTocId ?: continue
+            val lineId = lineKeyToId[bookPath to lineIdx] ?: continue
+            repository.upsertLineAltToc(lineId, structureId, tocId)
+        }
+        return true
+    }
+
     companion object {
         // Lift these out of the hot loop — regex compile is non-trivial and
         // these were being created per call to parseDafIndex / per key
         // replace (called millions of times for the alt-TOC builder).
         private val DAF_INDEX_REGEX = Regex("(\\d+)([ab])?", RegexOption.IGNORE_CASE)
         private val DOTTED_INDEX_REGEX = Regex("\\.(\\d+)")
+
+        // Synthetic siman-level alt-TOC for curated aggadic midrashim.
+        private const val SIMANIM_STRUCTURE_KEY = "Simanim"
+        private const val SIMANIM_STRUCTURE_TITLE_EN = "Simanim"
+        private const val SIMANIM_STRUCTURE_TITLE_HE = "סימנים"
+
+        // Curated aggadic midrashim: 10 Midrash Rabbah books + Pesikta DeRav
+        // Kahana, Midrash Shmuel, Midrash Mishlei (structures vary; builder adapts).
+        private val SIMAN_ALTTOC_EN_KEYS: Set<String> = listOf(
+            "Bereishit Rabbah", "Shemot Rabbah", "Vayikra Rabbah",
+            "Bamidbar Rabbah", "Devarim Rabbah", "Ruth Rabbah",
+            "Eichah Rabbah", "Esther Rabbah", "Kohelet Rabbah",
+            "Shir HaShirim Rabbah",
+            "Pesikta DeRav Kahana", "Midrash Shmuel", "Midrash Mishlei",
+        ).mapNotNull { normalizeTitleKey(it) }.toSet()
+
+        private val SIMAN_ALTTOC_HE_KEYS: Set<String> = listOf(
+            "בראשית רבה", "שמות רבה", "ויקרא רבה", "במדבר רבה", "דברים רבה",
+            "רות רבה", "איכה רבה", "אסתר רבה", "קוהלת רבה", "שיר השירים רבה",
+            "פסיקתא דרב כהנא", "מדרש שמואל", "מדרש משלי",
+        ).mapNotNull { normalizeTitleKey(it) }.toSet()
     }
 }
