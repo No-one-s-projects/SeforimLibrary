@@ -76,7 +76,7 @@ fun main(args: Array<String>) {
  * `שם ספר,קבוצת דור` rows. Requires the header row, ignores blank rows with a
  * visible warning, and fails on malformed non-blank data rows.
  */
-private fun parseGenerations(lines: List<String>, logger: Logger): List<Pair<String, String>> {
+internal fun parseGenerations(lines: List<String>, logger: Logger): List<Pair<String, String>> {
     val sourceName = GENERATIONS_FILE
     val blankRows = lines.count { parseForDbCsvLine(it).all { field -> field.trim().isEmpty() } }
     if (blankRows > 0) {
@@ -93,7 +93,7 @@ private fun parseGenerations(lines: List<String>, logger: Logger): List<Pair<Str
         .map { f -> f[0] to f[1] }
 }
 
-private data class GenerationApplyResult(
+internal data class GenerationApplyResult(
     val generationsCreated: Int,
     val linksCreated: Int,
     val unmatched: Int,
@@ -105,7 +105,7 @@ private data class GenerationApplyResult(
  * mismatches fail the task so the CSV can be corrected instead of guessed.
  * INSERT OR IGNORE keeps re-runs idempotent.
  */
-private fun applyGenerations(
+internal fun applyGenerations(
     conn: Connection,
     rows: List<Pair<String, String>>,
     logger: Logger,

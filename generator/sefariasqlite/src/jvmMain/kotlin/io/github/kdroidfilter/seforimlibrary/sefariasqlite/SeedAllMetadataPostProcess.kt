@@ -24,7 +24,8 @@ import kotlin.system.exitProcess
 
 /**
  * Enriches book metadata in an already-built seforim.db from two assets in the
- * `fordb-latest` release archive (same source as renameCategories/seedGenerations):
+ * the immutable release selected by `fordb_latest_pointer.json` (same source as
+ * renameCategories/seedGenerations):
  *
  *  - ForDB/all_metadata.json — publication dates/places per book.
  *  - ForDB/sefaria_metadata_changes.csv — per-title description overrides
@@ -81,8 +82,12 @@ fun main(args: Array<String>) = runBlocking {
         )
         val bindings = IdAllocatorBindings(allocator, repository)
 
+        // Resolve every fatal category-path assertion before the first metadata
+        // write.  Otherwise a missing late category could leave earlier book/pub
+        // metadata committed even though the task reports failure.
+        val categoryPlan = planCategoryDescriptionOverrides(repository, categoryOverrides)
         val result = applyMetadata(repository, bindings, bulk, descriptions, logger)
-        val categoryResult = applyCategoryDescriptionOverrides(repository, categoryOverrides, logger)
+        val categoryResult = applyCategoryDescriptionPlan(repository, categoryPlan, logger)
         runCatching {
             allocator.snapshotTo(
                 target = buildStatePath,
@@ -208,7 +213,18 @@ internal suspend fun applyCategoryDescriptionOverrides(
     repository: SeforimRepository,
     overrides: List<CategoryDescriptionOverride>,
     logger: Logger,
-): CategoryDescriptionApplyResult {
+): CategoryDescriptionApplyResult =
+    applyCategoryDescriptionPlan(repository, planCategoryDescriptionOverrides(repository, overrides), logger)
+
+internal data class CategoryDescriptionPlan(
+    val records: Int,
+    val updates: List<CategoryDescriptionUpdate>,
+)
+
+internal suspend fun planCategoryDescriptionOverrides(
+    repository: SeforimRepository,
+    overrides: List<CategoryDescriptionOverride>,
+): CategoryDescriptionPlan {
     val rowsByPath = repository.getAllCategoryDescriptionRows().associateBy { it.canonicalPath }
     val updates = overrides.mapNotNull { override ->
         val current = requireNotNull(rowsByPath[override.canonicalPath]) {
@@ -223,11 +239,20 @@ internal suspend fun applyCategoryDescriptionOverrides(
             CategoryDescriptionUpdate(current.categoryId, shortValue, longValue)
         }
     }
+    return CategoryDescriptionPlan(overrides.size, updates)
+}
+
+internal suspend fun applyCategoryDescriptionPlan(
+    repository: SeforimRepository,
+    plan: CategoryDescriptionPlan,
+    logger: Logger,
+): CategoryDescriptionApplyResult {
+    val updates = plan.updates
     repository.setCategoryDescriptionsBatch(updates)
     val result = CategoryDescriptionApplyResult(
-        records = overrides.size,
+        records = plan.records,
         updated = updates.size,
-        unchanged = overrides.size - updates.size,
+        unchanged = plan.records - updates.size,
     )
     logger.i {
         "Category description overrides: records=${result.records}, " +
