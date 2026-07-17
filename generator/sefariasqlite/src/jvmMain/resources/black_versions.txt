@@ -48,6 +48,10 @@
 ערוך השולחן | https://www.nli.org.il/he/books/NNL_ALEPH001326511
 חוות יאיר | https://www.nli.org.il/he/books/NNL_ALEPH001842783
 
+# --- מהדורות לא-רצויות בתנ"ך ---
+# "מקרא מבואר" (תרגום/עיבוד דוד כוכב) — מוסר מכל החומשים והמגילות שבהם הוא מופיע.
+Miqra Mevoar, trans. and edited by David Kokhav, Jerusalem 2020
+
 # --- מהדורות בשפה זרה (יידיש נשארת בכוונה) ---
 Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otzar haTorah, 1985 [fa]
 בראשית | Judeo-Italian Pentateuch transcribed by Robbie Kramm [itk]
@@ -79,3 +83,34 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 תפסיר רס"ג | Tafsir Rasag temp
 # פרגמנט עם תרגום אנגלי משובץ (הכותרת מנוקדת — הועתקה מה-DB כלשונה):
 מחשבות חרוץ | מַחְשָׁבוֹת חָרוּץ אוֹת ו
+
+# גרסאות זבל שונות
+סידור ספרד | Modeh Anu
+
+# --- ספרים חיצוניים (מדיניות; ההסרה בגלל סוג החיבור) ---
+בן סירא | Ben Sira, David Kahana ed. -- Wikisource
+בן סירא | The Wisdom of Ben Sira, Cambridge University Press, 1899
+ספר יהודית | Ketuvim Achronim, Seckel Isaac Frankel. Warsaw, 1885
+ספר יהודית | תרגום מיוונית יצחק זעקיל פרענקיל,  ווארשא  1885, אתר דעת
+
+# --- "קדמוניות היהודים": תרגומי AI ותרגומים משכיליים/לא-מדויקים ---
+קדמוניות היהודים | AI Translation
+קדמוניות היהודים | AI Translation - Fixed
+קדמוניות היהודים | Yemei am olam, trans. Kalman Schulman. Vilna, 1886
+קדמוניות היהודים | מעובד מהתרגום של צ. ה. פיליפובסקי, בתשלום יוחסין
+קדמוניות היהודים | קדמניות היהודים, תרגום קלמן שולמן
+
+# --- תרגום התנ"ך ליידיש של יהואש (משורר חילוני מודרני; לא תרגום מסורתי — חריג לכלל "יידיש נשארת") ---
+# אותו versionTitle על 14 ספרי תנ"ך — חסימה גלובלית אחת:
+Yehoyesh's Yiddish Tanakh Translation [yi]
+משנה אבות | Pirkei Abot (Sayings of the Fathers) — Yiddish Translation by Yehoash (1921) [yi]
+
+# --- ביאורי מקרא מודרניים (גורדון, מעוז) ---
+איכה | Eichah in Modern Hebrew, by Dr. Yaacov Maoz, 2018
+דניאל | Tanakh im Beur Chadash, S.L. Gordon, 1933
+דניאל | דניאל בתרגום עברי (גורדון)
+דניאל | דניאל בתרגום עברי(גורדון)
+עזרא | Tanakh im Beur Chadash, S.L. Gordon, 1933
+
+# --- פרגמנט ויקיפדיה כפול (לתקוני הזהר יש נוסחים מלאים; זה 9 קטעים בלבד) ---
+תקוני הזהר | Hebrew Wikipedia
