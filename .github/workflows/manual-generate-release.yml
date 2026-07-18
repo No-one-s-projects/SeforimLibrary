@@ -351,11 +351,11 @@ jobs:
           test "$(stat -c %s "$INPUTS/sefaria-archive.tar.zst")" = "$(jq -r .archive.size "$SEFARIA_METADATA")"
           echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf "$INPUTS/sefaria-archive.tar.zst" -C "$INPUTS/sefaria-extract"
-          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name database_export -print | sort)
+          # The export root is the single directory holding both json/ and schemas/
+          # (the Docker-Compose archives no longer ship a database_export folder).
+          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name schemas -print | sort | while read -r s; do d="$(dirname "$s")"; test -d "$d/json" && printf '%s\n' "$d"; done)
           test "${#SEFARIA_DB_ROOTS[@]}" -eq 1
-          SEFARIA_DB_ROOT="${SEFARIA_DB_ROOTS[0]}"
-          test -d "$SEFARIA_DB_ROOT/json" && test -d "$SEFARIA_DB_ROOT/schemas"
-          SEFARIA_EXTRACT_ROOT=$(dirname "$SEFARIA_DB_ROOT")
+          SEFARIA_EXTRACT_ROOT="${SEFARIA_DB_ROOTS[0]}"
 
           gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
             --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
@@ -529,15 +529,33 @@ jobs:
         id: relink
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          # Operator toggle (repo variable, no code change to flip): 'kaggle' (default)
+          # runs the serial relink on a Kaggle GPU JIT session; 'server' runs it on the
+          # Oracle ARM box. Set with: gh variable set SERIAL_LINKER_TARGET -R Otzaria/SeforimLibrary -b kaggle
+          SERIAL_LINKER_TARGET: ${{ vars.SERIAL_LINKER_TARGET || 'kaggle' }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
-          gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
-            -f library_run_id=${{ github.run_id }}
+          # Owner decision (2026-07-19): serial relinks run on a Kaggle GPU session by
+          # default (SERIAL_LINKER_TARGET=kaggle) — kaggle-relink.yml registers a one-job
+          # JIT runner, queues relink.yml with target=kaggle + our run id, and pushes the
+          # kernel that boots into the job; this also keeps the relink off this build's
+          # host. 'server' dispatches relink.yml directly on the Oracle ARM box.
+          case "$SERIAL_LINKER_TARGET" in
+            kaggle)
+              gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
+                -f library_run_id=${{ github.run_id }} ;;
+            server)
+              gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
+                -f library_run_id=${{ github.run_id }} -f target=server ;;
+            *) echo "::error::SERIAL_LINKER_TARGET must be 'kaggle' or 'server', got '$SERIAL_LINKER_TARGET'"; exit 1 ;;
+          esac
           # Identify OUR run deterministically: relink.yml stamps library_run_id into its
           # run-name, so a concurrent manual dispatch can never be picked up by mistake.
+          # 20 min budget: the kaggle-relink dispatcher (ubuntu-latest) needs 1-3 min to
+          # register the JIT and queue the relink before the run can even appear.
           RUN=""
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 120); do
             sleep 10
             RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L20 \
               --json databaseId,displayTitle \
@@ -547,7 +565,27 @@ jobs:
           [ -n "$RUN" ] || { echo "::error::relink run for library_run_id=${{ github.run_id }} never appeared"; exit 1; }
           echo "relink run: $RUN"
           echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
-          gh run watch "$RUN" -R Otzaria/LinkerToOtzaria --exit-status
+          # Low-frequency resilient wait: `gh run watch` polls every 3s, which can
+          # exhaust the shared 5k/hr API quota on an hours-long relink; transient
+          # API errors must not kill an otherwise-healthy build. A run stuck in
+          # `queued` past 30 min means the Kaggle session never booted (quota,
+          # dataset, image drift) — fail loudly instead of burning the job timeout.
+          queued_for=0
+          while :; do
+            state="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RUN" --jq '.status + ":" + (.conclusion // "")' 2>"$RUNNER_TEMP/wait-err.txt" || { grep -q "HTTP 401" "$RUNNER_TEMP/wait-err.txt" && echo fatal-auth || echo transient; })"
+            case "$state" in
+              completed:success) break ;;
+              completed:*) echo "::error::relink run $RUN concluded ${state#completed:}"; exit 1 ;;
+              fatal-auth) echo "::error::token rejected (HTTP 401) while waiting — dead credentials cannot heal"; exit 1 ;;
+              queued:*)
+                queued_for=$((queued_for + 60))
+                if [ "$queued_for" -ge 1800 ]; then
+                  echo "::error::relink run $RUN still queued after 30 min — Kaggle session never picked it up"; exit 1
+                fi
+                sleep 60 ;;
+              *) queued_for=0; sleep 60 ;;
+            esac
+          done
 
       # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
       # that exact run (not "latest release") so the handshake is fully deterministic.
