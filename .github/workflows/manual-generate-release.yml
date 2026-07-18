@@ -351,11 +351,11 @@ jobs:
           test "$(stat -c %s "$INPUTS/sefaria-archive.tar.zst")" = "$(jq -r .archive.size "$SEFARIA_METADATA")"
           echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf "$INPUTS/sefaria-archive.tar.zst" -C "$INPUTS/sefaria-extract"
-          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name database_export -print | sort)
+          # The export root is the single directory holding both json/ and schemas/
+          # (the Docker-Compose archives no longer ship a database_export folder).
+          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name schemas -print | sort | while read -r s; do d="$(dirname "$s")"; test -d "$d/json" && printf '%s\n' "$d"; done)
           test "${#SEFARIA_DB_ROOTS[@]}" -eq 1
-          SEFARIA_DB_ROOT="${SEFARIA_DB_ROOTS[0]}"
-          test -d "$SEFARIA_DB_ROOT/json" && test -d "$SEFARIA_DB_ROOT/schemas"
-          SEFARIA_EXTRACT_ROOT=$(dirname "$SEFARIA_DB_ROOT")
+          SEFARIA_EXTRACT_ROOT="${SEFARIA_DB_ROOTS[0]}"
 
           gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
             --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"

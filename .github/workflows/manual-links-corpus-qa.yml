@@ -131,9 +131,11 @@ jobs:
           test "$(stat -c %s "$INPUTS/archive.tar.zst")" = "$(jq -r .archive.size "$METADATA")"
           echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/archive.tar.zst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf "$INPUTS/archive.tar.zst" -C "$INPUTS/export"
-          mapfile -t DATABASE_EXPORTS < <(find "$INPUTS/export" -type d -name database_export -print | sort)
-          test "${#DATABASE_EXPORTS[@]}" -eq 1
-          dirname "${DATABASE_EXPORTS[0]}" > "$INPUTS/export-root.txt"
+          # The export root is the single directory holding both json/ and schemas/
+          # (the Docker-Compose archives no longer ship a database_export folder).
+          mapfile -t EXPORT_ROOTS < <(find "$INPUTS/export" -type d -name schemas -print | sort | while read -r s; do d="$(dirname "$s")"; test -d "$d/json" && printf '%s\n' "$d"; done)
+          test "${#EXPORT_ROOTS[@]}" -eq 1
+          printf '%s\n' "${EXPORT_ROOTS[0]}" > "$INPUTS/export-root.txt"
 
       - name: Run the immutable full-corpus gate
         run: |

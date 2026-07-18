@@ -100,7 +100,7 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("EXPECTED_SOURCE_RECORDS: '17980'"))
         assertTrue(workflow.contains("EXPECTED_EXCLUDED_RECORDS: '174'"))
         assertTrue(workflow.contains("EXPECTED_ANCHORS: '17980'"))
-        assertTrue(workflow.contains("test \"\${#DATABASE_EXPORTS[@]}\" -eq 1"))
+        assertTrue(workflow.contains("test \"\${#EXPORT_ROOTS[@]}\" -eq 1"))
         assertTrue(workflow.contains(".refs.missing == 0"))
         assertTrue(workflow.contains(".refs.duplicate == 0"))
         assertTrue(workflow.contains(".anchors.drifted == 0"))
