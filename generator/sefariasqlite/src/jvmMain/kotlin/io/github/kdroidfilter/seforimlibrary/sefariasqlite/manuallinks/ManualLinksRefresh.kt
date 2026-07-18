@@ -764,7 +764,7 @@ internal class ManualLinksRefresh(
                 else -> error("Tashma vector mismatch at physical line $position")
             }
         }
-        require(identity == 732 && stripped == 17_381) { "Tashma vector classification changed: identity=$identity stripped=$stripped" }
+        require(identity == 732 && stripped == 17_378) { "Tashma vector classification changed: identity=$identity stripped=$stripped" }
         book.releaseFullProofLines()
         return TashmaProof(book)
     }
@@ -775,6 +775,10 @@ internal class ManualLinksRefresh(
         private const val TASHMA_SNAPSHOT_SHA = "0b67db43e6f2dedc2aa63fd670368b1ab23e9995d4c6458044e87b43d2c772e6"
         private val LEADING_MARKER = Regex("""^\s*[({][א-ת\"׳״]{1,5}[)}]\s""")
         private val TASHMA_EXCEPTIONS = mapOf(
+            // Sefaria upstream edits observed 2026-07-18 (gloss/doubled-marker removals).
+            1454 to ("d35ca6f38affcd0729ee0d9637b6a15ffc0d228e8cb3ecd4088ab777c88641ea" to "f6a76d7e7af916a8ace79c26b71d4c1b21c831585014f77c629465a1651275dd"),
+            1459 to ("0d67f595e80541820df897bb07adfb3e15eb69ecf95732b983679b94a965bd02" to "9580679666a89229180937347ec87ee21d4637cb20664083f879d99068ea3c3a"),
+            9725 to ("2f8b124758343d785824cb9094fe1158126b9eeb138c61922dd643376321c2ec" to "fc07ecb6a4944b58f38e67ef5327d6931b806c453ec7d5bb3507b3ece33beeca"),
             4717 to ("cb563f858d2275238b7d8da58bfb61ae18a44ca939dee2265e59cb58eb3b3183" to "6f1cc2f903f4cb48c4da408028bba9bf0fff6d7f8654662a854ffc38e3419e86"),
             6364 to ("bf846cd97d29d82d617da2bce572e57c04ca87660234de6b07955b28298f1c5a" to "49e66d24cffc5346896c3614698e0abfeca689b31b47f958cdf1b89cd38256c2"),
             6400 to ("dd3494ce9136748f777fba0006acadfe461eb320ec6bd03b48f2b7b0427dbe41" to "b5aa7bbaa64553260bb5e34e5a407d3564671964ad1069b5395ed977d0420600"),
