@@ -529,15 +529,27 @@ jobs:
         id: relink
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          # Operator toggle (repo variable, no code change to flip): 'kaggle' (default)
+          # runs the serial relink on a Kaggle GPU JIT session; 'server' runs it on the
+          # Oracle ARM box. Set with: gh variable set SERIAL_LINKER_TARGET -R Otzaria/SeforimLibrary -b kaggle
+          SERIAL_LINKER_TARGET: ${{ vars.SERIAL_LINKER_TARGET || 'kaggle' }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
-          # Owner decision (2026-07-19): serial relinks run on a Kaggle GPU session.
-          # kaggle-relink.yml registers a one-job JIT runner, queues relink.yml with
-          # target=kaggle + our run id, and pushes the kernel that boots into the job.
-          # This also keeps the relink off this build's host (RAM headroom).
-          gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
-            -f library_run_id=${{ github.run_id }}
+          # Owner decision (2026-07-19): serial relinks run on a Kaggle GPU session by
+          # default (SERIAL_LINKER_TARGET=kaggle) — kaggle-relink.yml registers a one-job
+          # JIT runner, queues relink.yml with target=kaggle + our run id, and pushes the
+          # kernel that boots into the job; this also keeps the relink off this build's
+          # host. 'server' dispatches relink.yml directly on the Oracle ARM box.
+          case "$SERIAL_LINKER_TARGET" in
+            kaggle)
+              gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
+                -f library_run_id=${{ github.run_id }} ;;
+            server)
+              gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
+                -f library_run_id=${{ github.run_id }} -f target=server ;;
+            *) echo "::error::SERIAL_LINKER_TARGET must be 'kaggle' or 'server', got '$SERIAL_LINKER_TARGET'"; exit 1 ;;
+          esac
           # Identify OUR run deterministically: relink.yml stamps library_run_id into its
           # run-name, so a concurrent manual dispatch can never be picked up by mistake.
           # 20 min budget: the kaggle-relink dispatcher (ubuntu-latest) needs 1-3 min to
