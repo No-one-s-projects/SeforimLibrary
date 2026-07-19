@@ -532,12 +532,18 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
-          gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
+          # Owner decision (2026-07-19): serial relinks run on a Kaggle GPU session.
+          # kaggle-relink.yml registers a one-job JIT runner, queues relink.yml with
+          # target=kaggle + our run id, and pushes the kernel that boots into the job.
+          # This also keeps the relink off this build's host (RAM headroom).
+          gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
             -f library_run_id=${{ github.run_id }}
           # Identify OUR run deterministically: relink.yml stamps library_run_id into its
           # run-name, so a concurrent manual dispatch can never be picked up by mistake.
+          # 20 min budget: the kaggle-relink dispatcher (ubuntu-latest) needs 1-3 min to
+          # register the JIT and queue the relink before the run can even appear.
           RUN=""
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 120); do
             sleep 10
             RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L20 \
               --json databaseId,displayTitle \
@@ -549,13 +555,22 @@ jobs:
           echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
           # Low-frequency resilient wait: `gh run watch` polls every 3s, which can
           # exhaust the shared 5k/hr API quota on an hours-long relink; transient
-          # API errors must not kill an otherwise-healthy build.
+          # API errors must not kill an otherwise-healthy build. A run stuck in
+          # `queued` past 30 min means the Kaggle session never booted (quota,
+          # dataset, image drift) — fail loudly instead of burning the job timeout.
+          queued_for=0
           while :; do
             state="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RUN" --jq '.status + ":" + (.conclusion // "")' 2>/dev/null || echo transient)"
             case "$state" in
               completed:success) break ;;
               completed:*) echo "::error::relink run $RUN concluded ${state#completed:}"; exit 1 ;;
-              *) sleep 60 ;;
+              queued:*)
+                queued_for=$((queued_for + 60))
+                if [ "$queued_for" -ge 1800 ]; then
+                  echo "::error::relink run $RUN still queued after 30 min — Kaggle session never picked it up"; exit 1
+                fi
+                sleep 60 ;;
+              *) queued_for=0; sleep 60 ;;
             esac
           done
 
