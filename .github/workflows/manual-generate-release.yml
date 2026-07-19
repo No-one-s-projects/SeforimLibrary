@@ -547,7 +547,17 @@ jobs:
           [ -n "$RUN" ] || { echo "::error::relink run for library_run_id=${{ github.run_id }} never appeared"; exit 1; }
           echo "relink run: $RUN"
           echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
-          gh run watch "$RUN" -R Otzaria/LinkerToOtzaria --exit-status
+          # Low-frequency resilient wait: `gh run watch` polls every 3s, which can
+          # exhaust the shared 5k/hr API quota on an hours-long relink; transient
+          # API errors must not kill an otherwise-healthy build.
+          while :; do
+            state="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RUN" --jq '.status + ":" + (.conclusion // "")' 2>/dev/null || echo transient)"
+            case "$state" in
+              completed:success) break ;;
+              completed:*) echo "::error::relink run $RUN concluded ${state#completed:}"; exit 1 ;;
+              *) sleep 60 ;;
+            esac
+          done
 
       # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
       # that exact run (not "latest release") so the handshake is fully deterministic.
