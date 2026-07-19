@@ -572,10 +572,11 @@ jobs:
           # dataset, image drift) — fail loudly instead of burning the job timeout.
           queued_for=0
           while :; do
-            state="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RUN" --jq '.status + ":" + (.conclusion // "")' 2>/dev/null || echo transient)"
+            state="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RUN" --jq '.status + ":" + (.conclusion // "")' 2>"$RUNNER_TEMP/wait-err.txt" || { grep -q "HTTP 401" "$RUNNER_TEMP/wait-err.txt" && echo fatal-auth || echo transient; })"
             case "$state" in
               completed:success) break ;;
               completed:*) echo "::error::relink run $RUN concluded ${state#completed:}"; exit 1 ;;
+              fatal-auth) echo "::error::token rejected (HTTP 401) while waiting — dead credentials cannot heal"; exit 1 ;;
               queued:*)
                 queued_for=$((queued_for + 60))
                 if [ "$queued_for" -ge 1800 ]; then
