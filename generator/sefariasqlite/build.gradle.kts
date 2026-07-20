@@ -203,12 +203,13 @@ tasks.register<JavaExec>("renameCategories") {
         systemProperty("seforimDb", defaultDbPath)
     }
 
-    jvmArgs = listOf("-Xmx256m")
+    jvmArgs = listOf("-Xmx1g", "-XX:+UseG1GC")
 }
 
 // Metadata enrichment — sets sourceId and pub dates/places from ForDB/all_metadata.json
 // and replaces heShortDesc/heDesc from ForDB/sefaria_metadata_changes.csv. Both assets
-// come from the fordb-latest release archive. Runs after the other post-process seeders.
+// come from the immutable release selected by fordb_latest_pointer.json. Runs after
+// the other post-process seeders.
 // pub_date/pub_place are created through the IdAllocator, so this loads build_state and
 // needs the generator heap (not 512m).
 // Usage:
@@ -236,3 +237,44 @@ tasks.register<JavaExec>("seedAllMetadata") {
         "-XX:+UseG1GC",
     )
 }
+
+// Dry-run validation of EVERY ForDB rename/move rule against a real seforim.db:
+// the exact appliers in the exact build order, in a rolled-back transaction, and
+// a complete all-failures report instead of a first-row crash. The DB is never
+// mutated. update-fordb runs this on the CANDIDATE archive + the last released DB
+// before advancing the immutable pointer; the build's renameCategories pass runs the same
+// collector as a pre-mutation preflight.
+// Usage:
+//   ./gradlew :sefariasqlite:validateForDbInputs -PseforimDb=/path/to/seforim.db \
+//       [-PforDbArchive=/path/to/fordb_latest.zip -PforDbSha256=<64-hex>]
+tasks.register<JavaExec>("validateForDbInputs") {
+    group = "verification"
+    description = "Dry-run all ForDB rename/move rules against a seforim.db (rollback, all-failures report)."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.ValidateForDbInputsKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+
+    jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
+}
+
+// Each ForDB post-process runs as its own JVM. When the release build pins the
+// ForDB archive (-PforDbArchive + -PforDbSha256), forward both properties to all
+// of them so they read byte-identical inputs instead of resolving the repository
+// pointer independently. No effect for a local run that omits them.
+tasks.matching { it.name in setOf("renameCategories", "seedGenerations", "seedAllMetadata", "validateForDbInputs") }
+    .configureEach {
+        this as JavaExec
+        for (p in listOf("forDbArchive", "forDbSha256")) {
+            if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
+        }
+    }

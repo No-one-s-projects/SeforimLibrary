@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -31,7 +32,8 @@ import kotlin.system.exitProcess
  *  - book_renames.csv     `old,new` — book title renames (exact match)
  *  - book_moves.csv       `name,sourcePath,destPath` (simple CSV; embedded newlines in quoted fields are not supported)
  *
- * Rules are fetched from the fixed `fordb-latest` GitHub release asset.
+ * Rules are fetched through the repository's atomic `fordb_latest_pointer.json`;
+ * the pointer names an immutable content-addressed release and archive digest.
  * Download failures are fatal because silently skipping these rules can produce
  * an invalid DB delta.
  *
@@ -58,10 +60,18 @@ import kotlin.system.exitProcess
  * Env alternatives:
  *   SEFORIM_DB
  */
-private const val FOR_DB_RELEASE_API =
-    "https://api.github.com/repos/Otzaria/otzaria-library/releases/tags/fordb-latest"
+private const val FOR_DB_POINTER_URL =
+    "https://raw.githubusercontent.com/Otzaria/otzaria-library/main/fordb_latest_pointer.json"
+private const val FOR_DB_RELEASE_API_PREFIX =
+    "https://api.github.com/repos/Otzaria/otzaria-library/releases/tags/"
 private const val FOR_DB_ARCHIVE_NAME = "fordb_latest.zip"
 private const val FOR_DB_USER_AGENT = "SeforimLibrary-ForDBFetcher/1.0"
+// When set, every ForDB post-process reads this exact local archive instead of
+// resolving the repository pointer, so the three separate JVM processes
+// (renameCategories/seedGenerations/seedAllMetadata) consume byte-identical
+// inputs. The release build pins it; -PforDbSha256 must accompany it.
+private const val FOR_DB_ARCHIVE_PROPERTY = "forDbArchive"
+private const val FOR_DB_SHA256_PROPERTY = "forDbSha256"
 internal val FOR_DB_CSV_FILES = mapOf(
     "categoryRenames" to "category_renames.csv",
     "categoryMoves" to "category_moves.csv",
@@ -101,10 +111,34 @@ fun main(args: Array<String>) {
         parseBookMoves(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("bookMoves"), logger), logger)
     val categoryMoves: List<CategoryMove> =
         parseCategoryMoves(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryMoves"), logger), logger)
+    // Parse every downstream ForDB asset before the first ForDB transaction.
+    // Semantic checks that require post-append books still run in their real
+    // appliers, but malformed JSON/CSV/header/duplicate-path input can never be
+    // discovered only after rename/move mutations were committed.
+    parseGenerations(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("generations"), logger), logger)
+    parseBulkMetadata(downloadRequiredForDbFile("all_metadata.json", logger))
+    parseDescriptionOverrides(downloadRequiredForDbFile("sefaria_metadata_changes.csv", logger))
+    parseCategoryDescriptionOverrides(
+        downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryDescriptions"), logger),
+    )
 
     try {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
             conn.autoCommit = false
+
+            // PREFLIGHT (defence in depth beside the update-fordb publish gate): dry-run
+            // every rule in the exact order below, collecting ALL failures, and fail
+            // with the complete report BEFORE any mutation is committed — one broken
+            // path (the "מהרש"ם" class) must never crash a build hours in on the first
+            // bad row. The transaction is rolled back; the real pass then starts clean.
+            val preflight = collectForDbRuleFailures(conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger)
+            conn.rollback()
+            if (preflight.isNotEmpty()) {
+                reportForDbRuleFailures(preflight, logger)
+                logger.e { "ForDB preflight FAILED: ${preflight.size} rule(s) cannot apply; DB left untouched" }
+                exitProcess(1)
+            }
+            logger.i { "ForDB preflight passed — applying for real" }
 
             var totalRenamed = 0
             var totalMerged = 0
@@ -160,7 +194,7 @@ private val EXPLICIT_CATEGORY_PREFIX_RULES = setOf(
     "פירושים מודרניים",
 )
 
-private fun parseCategoryRenames(lines: List<String>): List<CategoryRename> =
+internal fun parseCategoryRenames(lines: List<String>): List<CategoryRename> =
     parseRequiredCsvRows(lines, FOR_DB_CSV_FILES.getValue("categoryRenames"), minFields = 2).map { f ->
         val matchMode = if (f[0] in EXPLICIT_CATEGORY_PREFIX_RULES) {
             CategoryMatchMode.Prefix
@@ -274,7 +308,7 @@ internal fun parseForDbCsvRecords(text: String): List<List<String>> {
  * Missing or malformed headers fail the task so release data issues are not
  * hidden.
  */
-private fun parseBookMoves(lines: List<String>, logger: Logger): List<BookMove> {
+internal fun parseBookMoves(lines: List<String>, logger: Logger): List<BookMove> {
     val firstLower = lines.firstOrNull()?.lowercase()
     val isHeader = firstLower != null && "source path" in firstLower && "destination path" in firstLower
     require(isHeader) {
@@ -489,7 +523,7 @@ private fun findSourceCategories(conn: Connection, rule: CategoryRename): List<P
     }
 }
 
-private fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: String, logger: Logger): Int {
+internal fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: String, logger: Logger): Int {
     val ids = findBookIdsByTitle(conn, oldTitle)
     if (ids.isEmpty()) {
         val alreadyRenamed = findBookIdsByTitle(conn, newTitle)
@@ -522,7 +556,7 @@ private fun findBookIdsByTitle(conn: Connection, title: String): List<Long> =
         }
     }
 
-private data class BookMove(val name: String, val sourcePath: String, val destPath: String)
+internal data class BookMove(val name: String, val sourcePath: String, val destPath: String)
 
 internal data class CategoryMove(val sourcePath: String, val destParentPath: String)
 
@@ -598,7 +632,7 @@ private fun categoryParent(conn: Connection, categoryId: Long): Long? =
  * Updates the matching book's categoryId. Source path must fully exist; the
  * destination's leaf is created if missing (parents must exist).
  */
-private fun applyBookMove(conn: Connection, move: BookMove, logger: Logger): Int {
+internal fun applyBookMove(conn: Connection, move: BookMove, logger: Logger): Int {
     val sourceCatId = resolveCategoryPath(conn, move.sourcePath)
         ?: error("Book move source '${move.sourcePath}' not found for '${move.name}'")
     val destCatId = resolveOrCreateDestCategory(conn, move.destPath, logger)
@@ -697,8 +731,10 @@ internal fun resolveSeforimDbPath(args: Array<String>): Path =
     )
 
 /**
- * Returns the lines of a required file (CSV or JSON) from the cached
- * `fordb-latest` release archive. Throws if the file is absent.
+ * Returns the lines of a required file (CSV or JSON) from the ForDB archive —
+ * the pinned local archive when -P[FOR_DB_ARCHIVE_PROPERTY] is set, otherwise the
+ * downloaded immutable release selected by `fordb_latest_pointer.json`. Cached per
+ * process. Throws if the file is absent or any pointer/archive digest check fails.
  */
 internal fun downloadRequiredForDbFile(fileName: String, logger: Logger): List<String> =
     forDbReleaseFiles(logger).getValue(fileName)
@@ -708,19 +744,11 @@ private var cachedForDbFiles: Map<String, List<String>>? = null
 private fun forDbReleaseFiles(logger: Logger): Map<String, List<String>> {
     cachedForDbFiles?.let { return it }
 
-    val archiveUrl = forDbReleaseArchiveUrl(logger)
-    logger.i { "Downloading ForDB release archive from $archiveUrl" }
-    val files = try {
-        OptimizedHttpClient.downloadStream(
-            url = archiveUrl,
-            userAgent = FOR_DB_USER_AGENT,
-            logger = logger
-        ).stream.use { stream ->
-            readForDbZip(stream)
-        }
-    } catch (e: Exception) {
-        logger.e(e) { "Failed to download or read required ForDB release archive; aborting" }
-        throw IllegalStateException("Failed to load required ForDB release archive", e)
+    val pinnedArchive = System.getProperty(FOR_DB_ARCHIVE_PROPERTY)?.takeIf { it.isNotBlank() }
+    val files = if (pinnedArchive != null) {
+        readPinnedForDbArchive(Paths.get(pinnedArchive), logger)
+    } else {
+        downloadForDbArchive(logger)
     }
 
     val missing = FOR_DB_CSV_FILES.values.filterNot { it in files }
@@ -732,13 +760,116 @@ private fun forDbReleaseFiles(logger: Logger): Map<String, List<String>> {
     return files
 }
 
-private fun forDbReleaseArchiveUrl(logger: Logger): String {
-    val body = OptimizedHttpClient.fetchJson(FOR_DB_RELEASE_API, FOR_DB_USER_AGENT, logger)
-    val assets = Json.parseToJsonElement(body).jsonObject.getValue("assets").jsonArray
-    val asset = assets.firstOrNull {
+/**
+ * Reads ForDB files from a pinned local archive whose SHA-256 must equal the
+ * digest supplied via -P[FOR_DB_SHA256_PROPERTY]. The release build takes this
+ * path: the archive is downloaded once and its digest pinned by the dispatcher,
+ * so every post-process JVM consumes byte-identical inputs and the build stays a
+ * pure function of its inputs. Fails loudly on a missing digest or any mismatch —
+ * it never silently falls back to the network.
+ */
+private fun readPinnedForDbArchive(archive: Path, logger: Logger): Map<String, List<String>> {
+    val expectedSha = System.getProperty(FOR_DB_SHA256_PROPERTY)?.takeIf { it.isNotBlank() }?.lowercase()
+        ?: throw IllegalStateException(
+            "-P$FOR_DB_ARCHIVE_PROPERTY was given without -P$FOR_DB_SHA256_PROPERTY; " +
+                "a pinned archive must carry its expected SHA-256"
+        )
+    check(archive.exists()) { "Pinned ForDB archive not found at $archive" }
+    val bytes = archive.toFile().readBytes()
+    val actualSha = sha256Hex(bytes)
+    check(actualSha == expectedSha) {
+        "Pinned ForDB archive SHA-256 mismatch at $archive: expected $expectedSha, got $actualSha"
+    }
+    logger.i { "Reading pinned ForDB archive $archive (sha256=$actualSha)" }
+    return ByteArrayInputStream(bytes).use { readForDbZip(it) }
+}
+
+private fun downloadForDbArchive(logger: Logger): Map<String, List<String>> {
+    val download = forDbReleaseArchive(logger)
+    logger.i { "Downloading immutable ForDB archive ${download.tag} from ${download.url}" }
+    return try {
+        val bytes = OptimizedHttpClient.downloadStream(
+            url = download.url,
+            userAgent = FOR_DB_USER_AGENT,
+            logger = logger
+        ).stream.use { it.readBytes() }
+        val actualSha = sha256Hex(bytes)
+        check(actualSha == download.sha256) {
+            "Immutable ForDB archive SHA-256 mismatch: expected ${download.sha256}, got $actualSha"
+        }
+        ByteArrayInputStream(bytes).use(::readForDbZip)
+    } catch (e: Exception) {
+        logger.e(e) { "Failed to download or read required ForDB release archive; aborting" }
+        throw IllegalStateException("Failed to load required ForDB release archive", e)
+    }
+}
+
+private fun sha256Hex(bytes: ByteArray): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+    val sb = StringBuilder(digest.size * 2)
+    for (b in digest) {
+        val v = b.toInt() and 0xff
+        sb.append("0123456789abcdef"[v ushr 4])
+        sb.append("0123456789abcdef"[v and 0xf])
+    }
+    return sb.toString()
+}
+
+private data class ForDbDownload(val tag: String, val sha256: String, val url: String)
+
+private fun forDbReleaseArchive(logger: Logger): ForDbDownload {
+    val pointerBody = OptimizedHttpClient.fetchJson(FOR_DB_POINTER_URL, FOR_DB_USER_AGENT, logger)
+    val pointerElement = Json.parseToJsonElement(pointerBody)
+    check(
+        pointerBody == Json.encodeToString(
+            kotlinx.serialization.json.JsonElement.serializer(),
+            pointerElement,
+        ) + "\n"
+    ) { "ForDB pointer must be canonical JSON with one trailing LF (duplicates are forbidden)" }
+    val pointer = pointerElement.jsonObject
+    check(
+        pointer.keys == setOf(
+            "schema_version", "tag", "asset", "sha256", "provenance_asset", "provenance_sha256"
+        )
+    ) { "ForDB pointer has an unexpected key set" }
+    check(pointer.getValue("schema_version").jsonPrimitive.intOrNull == 1) {
+        "Unsupported ForDB pointer schema"
+    }
+    fun requiredString(key: String): String {
+        val primitive = pointer.getValue(key).jsonPrimitive
+        check(primitive.isString) { "ForDB pointer $key must be a JSON string" }
+        return primitive.content
+    }
+    val tag = requiredString("tag")
+    val assetName = requiredString("asset")
+    val expectedSha = requiredString("sha256")
+    val provenanceAsset = requiredString("provenance_asset")
+    val provenanceSha = requiredString("provenance_sha256")
+    check(assetName == FOR_DB_ARCHIVE_NAME) { "ForDB pointer names an unexpected archive" }
+    check(provenanceAsset == "fordb_provenance.json") { "ForDB pointer names an unexpected provenance asset" }
+    check(expectedSha.matches(Regex("[0-9a-f]{64}"))) { "ForDB pointer archive digest is invalid" }
+    check(provenanceSha.matches(Regex("[0-9a-f]{64}"))) { "ForDB pointer provenance digest is invalid" }
+    check(tag == "fordb-sha256-$expectedSha") { "ForDB pointer tag does not match its archive digest" }
+
+    val releaseBody = OptimizedHttpClient.fetchJson(
+        FOR_DB_RELEASE_API_PREFIX + tag,
+        FOR_DB_USER_AGENT,
+        logger,
+    )
+    val release = Json.parseToJsonElement(releaseBody).jsonObject
+    check(release.getValue("tag_name").jsonPrimitive.content == tag) {
+        "GitHub returned a different ForDB release tag"
+    }
+    val assets = release.getValue("assets").jsonArray
+    val matches = assets.filter {
         it.jsonObject["name"]?.jsonPrimitive?.content == FOR_DB_ARCHIVE_NAME
-    } ?: throw IllegalStateException("No $FOR_DB_ARCHIVE_NAME asset found in fordb-latest release")
-    return asset.jsonObject.getValue("url").jsonPrimitive.content
+    }
+    check(matches.size == 1) { "Immutable ForDB release must contain exactly one $FOR_DB_ARCHIVE_NAME asset" }
+    val url = matches.single().jsonObject.getValue("browser_download_url").jsonPrimitive
+    check(url.isString && url.content.startsWith("https://github.com/Otzaria/otzaria-library/releases/download/")) {
+        "Immutable ForDB release returned an unexpected asset URL"
+    }
+    return ForDbDownload(tag, expectedSha, url.content)
 }
 
 private fun readForDbZip(stream: InputStream): Map<String, List<String>> {
