@@ -59,6 +59,30 @@ class ManualGenerateReleaseWorkflowContractTest {
     }
 
     @Test
+    fun forDbRulesArchiveIsPinnedByDigestVerifiedAndRecorded() {
+        val workflow = repositoryRoot()
+            .resolve(".github/workflows/manual-generate-release.yml")
+            .readText()
+        // Declared as a required, sha256-shaped pinned input — same discipline as
+        // the Sefaria/Otzaria pins, so the build is a pure function of its inputs.
+        assertTrue(workflow.contains("fordb_archive_sha256:"), "ForDB archive digest must be a pinned input")
+        assertTrue(
+            workflow.contains("[[ \"\$FORDB_ARCHIVE_SHA\" =~ ^[0-9a-f]{64}\$ ]]"),
+            "the ForDB digest input must be validated as a sha256",
+        )
+        // Fetched exactly once and verified against the pin (fail closed on drift).
+        assertTrue(workflow.contains("gh release download fordb-latest -R otzaria/otzaria-library"))
+        assertTrue(workflow.contains("echo \"\$FORDB_ARCHIVE_SHA  \$FORDB_ARCHIVE\" | sha256sum -c -"))
+        // The one verified archive is handed to every ForDB post-process JVM.
+        assertTrue(workflow.contains("-PforDbArchive=\"\$FORDB_ARCHIVE\""))
+        assertTrue(workflow.contains("-PforDbSha256=\${{ inputs.fordb_archive_sha256 }}"))
+        // Recorded in provenance and part of the reuse-match, so a ForDB change can
+        // never be silently reused as an older build.
+        assertTrue(workflow.contains("\"fordb_archive_sha256\": os.environ[\"FORDB_ARCHIVE_SHA\"]"))
+        assertTrue(workflow.contains(".fordb_archive_sha256==\$fd"))
+    }
+
+    @Test
     fun bothReleaseManifestWritersConvergeOnImmutableState() {
         val root = repositoryRoot()
         val workflows = listOf(

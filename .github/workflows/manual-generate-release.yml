@@ -61,6 +61,10 @@ on:
         description: 'Raw SHA-256 of the Otzaria ZIP asset'
         type: string
         required: true
+      fordb_archive_sha256:
+        description: 'SHA-256 of the pinned ForDB rules archive (fordb_latest.zip)'
+        type: string
+        required: true
       expected_links_commit:
         description: 'otzaria-library commit containing refreshed links'
         type: string
@@ -111,6 +115,7 @@ jobs:
           OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/provenance-scan"
@@ -136,9 +141,11 @@ jobs:
               --arg st "$SEFARIA_TAG" --arg sm "$SEFARIA_METADATA_SHA" --arg sa "$SEFARIA_ARCHIVE_SHA" \
               --arg ot "$OTZARIA_TAG" --arg oa "$OTZARIA_ASSET_SHA" \
               --arg ec "$EXPECTED_LINKS_COMMIT" --arg tc "$OTZARIA_TARGET_COMMIT" \
+              --arg fd "$FORDB_ARCHIVE_SHA" \
               '.source_commit==$source and .sefaria_tag==$st and .sefaria_release_metadata_sha256==$sm and
                .sefaria_archive_sha256==$sa and .otzaria_tag==$ot and .otzaria_asset_sha256==$oa and
-               .expected_links_commit==$ec and .otzaria_target_commit==$tc' "$file" >/dev/null; then
+               .expected_links_commit==$ec and .otzaria_target_commit==$tc and
+               .fordb_archive_sha256==$fd' "$file" >/dev/null; then
               test "$draft" = false
               test "$target" = "$SOURCE_COMMIT"
               # GitHub exposes sha256 digests for uploaded release assets. Every
@@ -314,6 +321,7 @@ jobs:
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
           CORRELATION_ID: ${{ inputs.correlation_id }}
+          FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN is required for pinned cross-repo downloads"; exit 1; }
@@ -323,6 +331,7 @@ jobs:
           [[ "$SEFARIA_METADATA_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$SEFARIA_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$OTZARIA_ASSET_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$FORDB_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CORRELATION_ID" =~ ^sefaria:[0-9]+:[0-9]+:[^:]+:[0-9a-f]{64}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           git fetch --no-tags origin refs/heads/otzaria:refs/remotes/origin/otzaria
@@ -410,12 +419,22 @@ jobs:
               raise SystemExit(f"packaged links tree mismatch: {actual} != {expected}")
           PY
 
+          # Pin the ForDB rules archive by digest: fetch it once here and verify it
+          # against the dispatch-time pin, then hand this exact local file to every
+          # ForDB post-process so all three JVMs read byte-identical rules instead of
+          # each re-fetching the moving `fordb-latest` tag. Fail closed on any drift.
+          FORDB_ARCHIVE="$INPUTS/fordb_latest.zip"
+          gh release download fordb-latest -R otzaria/otzaria-library \
+            --pattern fordb_latest.zip --dir "$INPUTS"
+          echo "$FORDB_ARCHIVE_SHA  $FORDB_ARCHIVE" | sha256sum -c -
+
           {
             echo "SEFARIA_EXTRACT_ROOT=$SEFARIA_EXTRACT_ROOT"
             echo "OTZARIA_EXTRACT_ROOT=$OTZARIA_EXTRACT_ROOT"
             echo "MANUAL_LINKS_LINEAGE=$LINEAGE"
             echo "MANUAL_LINKS_CONFIG=$CONFIG"
             echo "OTZARIA_ASSET_NAME=$OTZARIA_ASSET_NAME"
+            echo "FORDB_ARCHIVE=$FORDB_ARCHIVE"
           } >> "$GITHUB_ENV"
 
       # ─── Discover prior releases + decide db_version ───────────────────────
@@ -491,6 +510,8 @@ jobs:
             -PdbVersion=${{ steps.discover.outputs.db_version }} \
             -PinMemoryDb=false \
             -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
+            -PforDbArchive="$FORDB_ARCHIVE" \
+            -PforDbSha256=${{ inputs.fordb_archive_sha256 }} \
             --no-daemon --stacktrace
           # catalog.pb is no longer produced; drop any stale copy so a dirty
           # self-hosted workspace can't smuggle it into the bundle or a patch.
@@ -718,6 +739,7 @@ jobs:
           OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
         run: |
           set -euo pipefail
           STAGE=release-staging
@@ -765,6 +787,7 @@ jobs:
               "sefaria_archive_sha256": os.environ["SEFARIA_ARCHIVE_SHA"],
               "otzaria_tag": os.environ["OTZARIA_TAG"],
               "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
+              "fordb_archive_sha256": os.environ["FORDB_ARCHIVE_SHA"],
               "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
               "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
               "lineage_sha256": hashlib.sha256(lineage_path.read_bytes()).hexdigest(),
