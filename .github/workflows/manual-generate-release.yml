@@ -65,6 +65,20 @@ on:
         description: 'SHA-256 of the pinned ForDB rules archive (fordb_latest.zip)'
         type: string
         required: true
+      fordb_tag:
+        description: 'Immutable content-addressed ForDB release tag'
+        type: string
+        required: true
+      saga_run_id:
+        description: 'Origin sync-manual-links run for event-driven callback (empty for manual use)'
+        type: string
+        required: false
+        default: ''
+      saga_run_attempt:
+        description: 'Exact attempt of the origin sync-manual-links run (paired with saga_run_id)'
+        type: string
+        required: false
+        default: ''
       expected_links_commit:
         description: 'otzaria-library commit containing refreshed links'
         type: string
@@ -84,15 +98,19 @@ permissions:
 # Only one release build at a time. A RAM-backed build dir (see the tmpfs step)
 # makes two concurrent runs on the same self-hosted host a memory hazard, and a
 # release pipeline should never race itself. Queue rather than cancel — a build
-# in flight is expensive (hours) and must not be killed mid-way.
+# in flight is expensive (hours) and must not be killed mid-way; queue:max lifts
+# GitHub's single-pending slot to a durable queue so a later dispatch can't supersede
+# a pending build. (queue:max shipped 2026-05-07; confirm at canary — no lint gate here.)
 concurrency:
   group: seforim-manual-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   reconcile:
     name: Reuse a complete build with identical pinned inputs
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       reuse: ${{ steps.lookup.outputs.reuse }}
       release_tag: ${{ steps.lookup.outputs.release_tag }}
@@ -103,6 +121,47 @@ jobs:
       packaged_links_tree_sha256: ${{ steps.lookup.outputs.packaged_links_tree_sha256 }}
       assets_json: ${{ steps.lookup.outputs.assets_json }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Validate local orchestration boundary contracts
+        run: python3 .github/scripts/test_build_provenance.py && python3 .github/scripts/test_otzaria_provenance.py && python3 .github/scripts/test_host_safety.py
+      - name: Validate the complete immutable dispatch contract
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
+          OTZARIA_TAG: ${{ inputs.otzaria_tag }}
+          OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
+          FORDB_TAG: ${{ inputs.fordb_tag }}
+          FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
+          EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
+          OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          SAGA_RUN_ID: ${{ inputs.saga_run_id }}
+          SAGA_RUN_ATTEMPT: ${{ inputs.saga_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]]
+          [[ "$SEFARIA_METADATA_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SEFARIA_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$OTZARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]]
+          [[ "$OTZARIA_ASSET_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$FORDB_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$FORDB_TAG" == "fordb-sha256-$FORDB_ARCHIVE_SHA" ]]
+          [[ "$EXPECTED_LINKS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OTZARIA_TARGET_COMMIT" == "$EXPECTED_LINKS_COMMIT" ]]
+          [[ "$CORRELATION_ID" =~ ^sefaria:([1-9][0-9]*):([1-9][0-9]*):([A-Za-z0-9._-]{1,100}):([0-9a-f]{64})$ ]]
+          [[ "${BASH_REMATCH[3]}" == "$SEFARIA_TAG" ]]
+          [[ "${BASH_REMATCH[4]}" == "$SEFARIA_METADATA_SHA" ]]
+          if [[ -n "$SAGA_RUN_ID" || -n "$SAGA_RUN_ATTEMPT" ]]; then
+            [[ "$SAGA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$SAGA_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          fi
       - name: Find and verify exact provenance
         id: lookup
         env:
@@ -116,6 +175,7 @@ jobs:
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
           FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
+          FORDB_TAG: ${{ inputs.fordb_tag }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/provenance-scan"
@@ -136,18 +196,22 @@ jobs:
             [ "$provenance_id" != "NONE" ] || continue
             file="$RUNNER_TEMP/provenance-scan/$release_id.json"
             gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$provenance_id" > "$file"
+            python3 .github/scripts/validate_build_provenance.py "$file"
             if jq -e \
               --arg source "$SOURCE_COMMIT" \
               --arg st "$SEFARIA_TAG" --arg sm "$SEFARIA_METADATA_SHA" --arg sa "$SEFARIA_ARCHIVE_SHA" \
               --arg ot "$OTZARIA_TAG" --arg oa "$OTZARIA_ASSET_SHA" \
               --arg ec "$EXPECTED_LINKS_COMMIT" --arg tc "$OTZARIA_TARGET_COMMIT" \
-              --arg fd "$FORDB_ARCHIVE_SHA" \
+              --arg fd "$FORDB_ARCHIVE_SHA" --arg ft "$FORDB_TAG" \
               '.source_commit==$source and .sefaria_tag==$st and .sefaria_release_metadata_sha256==$sm and
                .sefaria_archive_sha256==$sa and .otzaria_tag==$ot and .otzaria_asset_sha256==$oa and
                .expected_links_commit==$ec and .otzaria_target_commit==$tc and
-               .fordb_archive_sha256==$fd' "$file" >/dev/null; then
+               .fordb_archive_sha256==$fd and .fordb_tag==$ft' "$file" >/dev/null; then
               test "$draft" = false
               test "$target" = "$SOURCE_COMMIT"
+              [[ "$tag" =~ ^v[1-9][0-9]*-[0-9]{14}$ ]]
+              encoded_tag="$(jq -rn --arg value "$tag" '$value|@uri')"
+              test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$encoded_tag" --jq .object.sha)" = "$SOURCE_COMMIT"
               # GitHub exposes sha256 digests for uploaded release assets. Every
               # payload declared by provenance must exist exactly once and match.
               while IFS=$'\t' read -r name size sha; do
@@ -198,7 +262,10 @@ jobs:
     needs: reconcile
     if: needs.reconcile.outputs.reuse != 'true'
     runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
-    timeout-minutes: 360
+    # Self-hosted jobs have a five-day execution ceiling.  Twelve hours keeps this
+    # parent above its bounded 8h relink child plus DB/package overhead; 360 is only
+    # the default and was too short for the legal child chain.
+    timeout-minutes: 720
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -256,6 +323,21 @@ jobs:
         run: |
           set -euo pipefail
           BUILD="$GITHUB_WORKSPACE/build"
+
+          # Take the real cross-repo lease before inspecting or cleaning shared
+          # host state.  A completed/cancelled Linker run may have left its NER
+          # process group alive; its start-time-bound scope is the only authority
+          # to stop it.  Reaping first also makes the memory preflight measure the
+          # resources this build will actually have.
+          LEASE=/run/lock/otzaria/host-heavy.lock
+          test -e "$LEASE" && test -w "$LEASE" || {
+            echo "::error::$LEASE must be provisioned mode 0666 (see .github/host/otzaria-pipeline.tmpfiles.conf)"
+            exit 1
+          }
+          echo "HOST_LEASE_STATE=$RUNNER_TEMP/host-lease.json" >> "$GITHUB_ENV"
+          python3 .github/scripts/host_lease.py start --lock "$LEASE" \
+            --state "$RUNNER_TEMP/host-lease.json" --ttl 43800
+          python3 .github/scripts/reap_linker_ner.py
 
           # Exclusivity: this host runs three self-hosted runners (SeforimLibrary,
           # otzaria, SefariaExport). A RAM-heavy release build must not share the
@@ -322,16 +404,21 @@ jobs:
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
           CORRELATION_ID: ${{ inputs.correlation_id }}
           FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
+          FORDB_TAG: ${{ inputs.fordb_tag }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN is required for pinned cross-repo downloads"; exit 1; }
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SEFARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]]
+          [[ "$OTZARIA_TAG" =~ ^[A-Za-z0-9._-]{1,100}$ ]]
           [[ "$EXPECTED_LINKS_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$OTZARIA_TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SEFARIA_METADATA_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$SEFARIA_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$OTZARIA_ASSET_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$FORDB_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$FORDB_TAG" =~ ^fordb-sha256-[0-9a-f]{64}$ ]]
+          [[ "${FORDB_TAG#fordb-sha256-}" == "$FORDB_ARCHIVE_SHA" ]]
           [[ "$CORRELATION_ID" =~ ^sefaria:[0-9]+:[0-9]+:[^:]+:[0-9a-f]{64}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           git fetch --no-tags origin refs/heads/otzaria:refs/remotes/origin/otzaria
@@ -369,6 +456,14 @@ jobs:
           gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
             --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
           PROVENANCE="$INPUTS/otzaria-assets/otzaria_release_provenance.json"
+          python3 .github/scripts/validate_otzaria_provenance.py "$PROVENANCE" \
+            --expected-target "$EXPECTED_LINKS_COMMIT" \
+            --expected-tag "$OTZARIA_TAG" \
+            --expected-asset-sha256 "$OTZARIA_ASSET_SHA"
+          PROVENANCE_DIGEST="$(gh release view "$OTZARIA_TAG" -R otzaria/otzaria-library --json assets \
+            --jq '.assets[] | select(.name=="otzaria_release_provenance.json") | .digest')"
+          [[ "$PROVENANCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$(sha256sum "$PROVENANCE" | cut -d' ' -f1)" == "${PROVENANCE_DIGEST#sha256:}" ]]
           test "$(jq -r .target_commit "$PROVENANCE")" = "$EXPECTED_LINKS_COMMIT"
           test "$(jq -r .asset.sha256 "$PROVENANCE")" = "$OTZARIA_ASSET_SHA"
           OTZARIA_ASSET_NAME=$(jq -r .asset.name "$PROVENANCE")
@@ -407,8 +502,10 @@ jobs:
           for entry in links.iterdir():
               if entry.is_symlink() or not entry.is_file():
                   raise SystemExit(f"non-regular or nested links entry: {entry}")
-              raw = entry.read_bytes()
-              records.append((f"links/{entry.name}".encode(), len(raw), hashlib.sha256(raw).digest()))
+              digest=hashlib.sha256()
+              with entry.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              records.append((f"links/{entry.name}".encode(), entry.stat().st_size, digest.digest()))
           stream = bytearray(b"manual-links-tree-v1\0")
           for path, size, digest in sorted(records, key=lambda row: row[0]):
               stream += struct.pack(">I", len(path)) + path + struct.pack(">Q", size) + digest
@@ -424,7 +521,7 @@ jobs:
           # ForDB post-process so all three JVMs read byte-identical rules instead of
           # each re-fetching the moving `fordb-latest` tag. Fail closed on any drift.
           FORDB_ARCHIVE="$INPUTS/fordb_latest.zip"
-          gh release download fordb-latest -R otzaria/otzaria-library \
+          gh release download "$FORDB_TAG" -R otzaria/otzaria-library \
             --pattern fordb_latest.zip --dir "$INPUTS"
           echo "$FORDB_ARCHIVE_SHA  $FORDB_ARCHIVE" | sha256sum -c -
 
@@ -435,6 +532,7 @@ jobs:
             echo "MANUAL_LINKS_CONFIG=$CONFIG"
             echo "OTZARIA_ASSET_NAME=$OTZARIA_ASSET_NAME"
             echo "FORDB_ARCHIVE=$FORDB_ARCHIVE"
+            echo "FORDB_ARCHIVE_SHA=$FORDB_ARCHIVE_SHA"
           } >> "$GITHUB_ENV"
 
       # ─── Discover prior releases + decide db_version ───────────────────────
@@ -446,8 +544,9 @@ jobs:
         id: discover
         run: |
           set -euo pipefail
-          gh release list --limit 100 --json tagName,isPrerelease,createdAt,name \
-            > all-releases.json
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft|not) | {tagName:.tag_name,isPrerelease:.prerelease,createdAt:.created_at,name:.name} | @json' \
+            | jq -sc '.' > all-releases.json
           : > prior-versions.tsv  # cols: db_version<TAB>release_tag
           while IFS= read -r tag; do
             VER=$(echo "$tag" | grep -oE '^v[0-9]+-' | tr -d 'v-' || true)
@@ -511,7 +610,7 @@ jobs:
             -PinMemoryDb=false \
             -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
             -PforDbArchive="$FORDB_ARCHIVE" \
-            -PforDbSha256=${{ inputs.fordb_archive_sha256 }} \
+            -PforDbSha256="$FORDB_ARCHIVE_SHA" \
             --no-daemon --stacktrace
           # catalog.pb is no longer produced; drop any stale copy so a dirty
           # self-hosted workspace can't smuggle it into the bundle or a patch.
@@ -531,13 +630,16 @@ jobs:
             --no-daemon --stacktrace
           zstd -T0 -19 -f -o build/lines_snapshot.db.zst build/lines_snapshot.db
           rm -f build/lines_snapshot.db
+          # Pin the snapshot handoff: the relink verifies the artifact it downloads
+          # against this digest, so it can only link the exact snapshot we produced.
+          echo "SNAPSHOT_ZST_SHA256=$(sha256sum build/lines_snapshot.db.zst | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
       # Hand the snapshot to the relink run as a workflow artifact of THIS run —
       # deterministic (no "latest release" race) and works before any release exists.
       - name: Upload snapshot artifact for the relink run
         uses: actions/upload-artifact@v4
         with:
-          name: lines-snapshot
+          name: lines-snapshot-${{ github.run_attempt }}
           path: build/lines_snapshot.db.zst
           retention-days: 7
           if-no-files-found: error
@@ -554,36 +656,112 @@ jobs:
           # runs the serial relink on a Kaggle GPU JIT session; 'server' runs it on the
           # Oracle ARM box. Set with: gh variable set SERIAL_LINKER_TARGET -R Otzaria/SeforimLibrary -b kaggle
           SERIAL_LINKER_TARGET: ${{ vars.SERIAL_LINKER_TARGET || 'kaggle' }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
+          # Per-attempt correlation identity: a deterministic sha256 over this exact
+          # attempt + the saga correlation + the pinned inputs + the target. A rerun
+          # (new attempt) yields a DIFFERENT id, so discovery/cleanup of this attempt
+          # can never touch another's runs. Threaded end-to-end: dispatch → both
+          # LinkerToOtzaria run-names → relink manifest → build provenance.
+          REQUEST_JSON=$(jq -cn \
+            --arg schema relink-request-v1 \
+            --arg parent_repository "$GITHUB_REPOSITORY" \
+            --argjson parent_run_id "$GITHUB_RUN_ID" \
+            --argjson parent_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg correlation_id "$CORRELATION_ID" \
+            --arg sefaria_tag "$SEFARIA_TAG" \
+            --arg sefaria_release_metadata_sha256 "$SEFARIA_METADATA_SHA" \
+            --arg snapshot_zst_sha256 "$SNAPSHOT_ZST_SHA256" \
+            --arg target "$SERIAL_LINKER_TARGET" \
+            '{schema: $schema, parent_repository: $parent_repository,
+              parent_run_id: $parent_run_id, parent_run_attempt: $parent_run_attempt,
+              correlation_id: $correlation_id, sefaria_tag: $sefaria_tag,
+              sefaria_release_metadata_sha256: $sefaria_release_metadata_sha256,
+              snapshot_zst_sha256: $snapshot_zst_sha256, target: $target}')
+          RELINK_REQUEST_ID=$(printf '%s' "$REQUEST_JSON" | sha256sum | cut -d' ' -f1)
+          # Must byte-match the run-name templates in relink.yml / kaggle-relink.yml —
+          # every consumer compares the FULL title with ==, never contains.
+          export RELINK_TITLE="relink request=$RELINK_REQUEST_ID parent=${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          export KAGGLE_TITLE="kaggle-relink request=$RELINK_REQUEST_ID parent=${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "RELINK_REQUEST_ID=$RELINK_REQUEST_ID"
+            echo "RELINK_TITLE=$RELINK_TITLE"
+            echo "KAGGLE_TITLE=$KAGGLE_TITLE"
+          } >> "$GITHUB_ENV"
+          echo "relink request id: $RELINK_REQUEST_ID"
+          # The child must run the LinkerToOtzaria main we observe NOW — a push landing
+          # mid-dispatch would silently change the engine under our pinned inputs.
+          # Capture the expected head + the dispatch time; discovery requires both.
+          LINKER_HEAD=$(gh api repos/Otzaria/LinkerToOtzaria/commits/main --jq .sha)
+          DISPATCHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # Owner decision (2026-07-19): serial relinks run on a Kaggle GPU session by
           # default (SERIAL_LINKER_TARGET=kaggle) — kaggle-relink.yml registers a one-job
-          # JIT runner, queues relink.yml with target=kaggle + our run id, and pushes the
+          # JIT runner, queues relink.yml with target=kaggle + our identity, and pushes the
           # kernel that boots into the job; this also keeps the relink off this build's
           # host. 'server' dispatches relink.yml directly on the Oracle ARM box.
+          # Inputs reach the dispatch ONLY via env (validated sha/tag shapes at job
+          # entry) — nothing raw is interpolated into this script body.
           case "$SERIAL_LINKER_TARGET" in
             kaggle)
               gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
-                -f library_run_id=${{ github.run_id }} ;;
+                -f library_run_id="$GITHUB_RUN_ID" \
+                -f relink_request_id="$RELINK_REQUEST_ID" \
+                -f parent_run_attempt="$GITHUB_RUN_ATTEMPT" \
+                -f sefaria_tag="$SEFARIA_TAG" \
+                -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
+                -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
             server)
+              # Serialize, do not delegate: release our real flock before dispatch.
+              python3 .github/scripts/host_lease.py release --state "$HOST_LEASE_STATE"
               gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
-                -f library_run_id=${{ github.run_id }} -f target=server ;;
+                -f library_run_id="$GITHUB_RUN_ID" -f target=server \
+                -f relink_request_id="$RELINK_REQUEST_ID" \
+                -f parent_run_attempt="$GITHUB_RUN_ATTEMPT" \
+                -f sefaria_tag="$SEFARIA_TAG" \
+                -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
+                -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
             *) echo "::error::SERIAL_LINKER_TARGET must be 'kaggle' or 'server', got '$SERIAL_LINKER_TARGET'"; exit 1 ;;
           esac
-          # Identify OUR run deterministically: relink.yml stamps library_run_id into its
-          # run-name, so a concurrent manual dispatch can never be picked up by mistake.
-          # 20 min budget: the kaggle-relink dispatcher (ubuntu-latest) needs 1-3 min to
-          # register the JIT and queue the relink before the run can even appear.
+          # Identify OUR run: EXACT title equality on the per-attempt request id, exactly
+          # one match (two runs sharing a fresh id is a broken invariant — refuse to
+          # guess), created at/after our dispatch, at the head we captured. Fully
+          # paginated REST over a created>=dispatch window — never "the last N runs"
+          # (fresh completed runs cannot push our child out of view) — and the window
+          # INCLUDES completed runs, so a child that failed fast is still found (the
+          # wait loop below then reports its real conclusion). 20 min budget: the
+          # kaggle-relink dispatcher (ubuntu-latest) needs 1-3 min to register the
+          # JIT and queue the relink before the run can even appear.
           RUN=""
           for _ in $(seq 1 120); do
             sleep 10
-            RUN=$(gh run list -R Otzaria/LinkerToOtzaria -w relink.yml -L20 \
-              --json databaseId,displayTitle \
-              -q '[.[] | select(.displayTitle | contains("library_run_id=${{ github.run_id }}"))][0].databaseId')
-            [ -n "$RUN" ] && break
+            # A transient listing error just means "retry next round"; the final
+            # hard failure below keeps this fail-loud, not fail-open.
+            if ! ROWS=$(gh api --paginate -X GET "repos/Otzaria/LinkerToOtzaria/actions/workflows/relink.yml/runs" \
+              -f created=">=$DISPATCHED_AT" -f per_page=100 \
+              --jq '.workflow_runs[] | select(.display_title == env.RELINK_TITLE) | [(.id|tostring), .head_sha, .created_at] | @tsv'); then
+              continue
+            fi
+            ROWS=$(printf '%s\n' "$ROWS" | awk -F'\t' 'NF && !seen[$1]++')
+            N=$(printf '%s' "$ROWS" | grep -c . || true)
+            if [ "$N" -gt 1 ]; then
+              echo "::error::$N relink runs share request id $RELINK_REQUEST_ID — refusing to guess"; exit 1
+            fi
+            if [ "$N" -eq 1 ]; then
+              IFS=$'\t' read -r RUN RUN_HEAD CREATED <<<"$ROWS"
+              if [[ "$CREATED" < "$DISPATCHED_AT" ]]; then
+                echo "::error::relink run $RUN was created at $CREATED, before our dispatch at $DISPATCHED_AT — a stale run carries our id"; exit 1
+              fi
+              if [ "$RUN_HEAD" != "$LINKER_HEAD" ]; then
+                echo "::error::relink run $RUN is at $RUN_HEAD but LinkerToOtzaria main was $LINKER_HEAD at dispatch — main moved mid-dispatch; rerun this build"; exit 1
+              fi
+              break
+            fi
           done
-          [ -n "$RUN" ] || { echo "::error::relink run for library_run_id=${{ github.run_id }} never appeared"; exit 1; }
+          [ -n "$RUN" ] || { echo "::error::relink run ($RELINK_TITLE) never appeared"; exit 1; }
           echo "relink run: $RUN"
           echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
           # Low-frequency resilient wait: `gh run watch` polls every 3s, which can
@@ -598,15 +776,24 @@ jobs:
               completed:success) break ;;
               completed:*) echo "::error::relink run $RUN concluded ${state#completed:}"; exit 1 ;;
               fatal-auth) echo "::error::token rejected (HTTP 401) while waiting — dead credentials cannot heal"; exit 1 ;;
-              queued:*)
+              queued:*|pending:*|requested:*|waiting:*)
+                # Every pre-start state counts toward the 30-min cap — a run blocked in
+                # `pending` on a busy concurrency group is just as stuck as one `queued`.
                 queued_for=$((queued_for + 60))
                 if [ "$queued_for" -ge 1800 ]; then
-                  echo "::error::relink run $RUN still queued after 30 min — Kaggle session never picked it up"; exit 1
+                  echo "::error::relink run $RUN still ${state%%:*} after 30 min — never started (Kaggle session or concurrency slot)"; exit 1
                 fi
                 sleep 60 ;;
               *) queued_for=0; sleep 60 ;;
             esac
           done
+          if [ "$SERIAL_LINKER_TARGET" = server ]; then
+            # The child is terminal now. Reacquire before this job touches the DB
+            # again; if another heavy phase won the race, fail rather than overlap.
+            python3 .github/scripts/host_lease.py start \
+              --lock /run/lock/otzaria/host-heavy.lock \
+              --state "$HOST_LEASE_STATE" --ttl 43800
+          fi
 
       # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
       # that exact run (not "latest release") so the handshake is fully deterministic.
@@ -615,11 +802,72 @@ jobs:
       - name: Apply LINKER links (Phase-2)
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          SEFARIA_TAG: ${{ inputs.sefaria_tag }}
+          RELINK_RUN_ID: ${{ steps.relink.outputs.run_id }}
         run: |
           set -euo pipefail
           rm -rf build/linker && mkdir -p build/linker
-          gh run download ${{ steps.relink.outputs.run_id }} -R Otzaria/LinkerToOtzaria \
-            -n linker-links -D build/linker
+          RUN_ATTEMPT="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RELINK_RUN_ID" --jq .run_attempt)"
+          [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          gh run download "$RELINK_RUN_ID" -R Otzaria/LinkerToOtzaria \
+            -n "linker-links-$RUN_ATTEMPT" -D build/linker
+          # The relink manifest binds this payload to the exact inputs it was linked
+          # against. Verify — fail-closed — that the payload matches its own digest, that
+          # the relink used THIS build's pinned Sefaria vintage + snapshot, and that it is
+          # the run we dispatched. Then record the linker's identity into provenance.
+          M=build/linker/relink_manifest.json
+          test -f "$M"
+          # Payload integrity — an independent cross-file digest check.
+          echo "$(jq -r .payload_sha256 "$M")  build/linker/linker_links.zst" | sha256sum -c -
+          # The relink run's ACTUAL GitHub identity — not the manifest's self-report.
+          RUN_HEAD_SHA="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RELINK_RUN_ID" --jq .head_sha)"
+          # Strictly validate the manifest before recording anything: exact key set, field
+          # types/formats, binding to this build's pinned Sefaria + snapshot, and — crucially —
+          # that its self-reported linker_commit / relink_run_attempt EQUAL the relink run's
+          # real head_sha / attempt. A forged or drifted manifest fails here, fail-closed.
+          MANIFEST="$M" EXP_SEFARIA_TAG="$SEFARIA_TAG" EXP_SNAPSHOT_SHA="$SNAPSHOT_ZST_SHA256" \
+          EXP_RUN_ID="$RELINK_RUN_ID" RUN_HEAD_SHA="$RUN_HEAD_SHA" RUN_ATTEMPT="$RUN_ATTEMPT" \
+          EXP_REQUEST_ID="$RELINK_REQUEST_ID" PARENT_RUN_ID="$GITHUB_RUN_ID" PARENT_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+          python3 - >> "$GITHUB_ENV" <<'PY'
+          import json, os, re, sys
+          def _no_dupes(pairs):
+              seen = {}
+              for k, v in pairs:
+                  if k in seen:
+                      sys.exit(f"relink manifest: duplicate key {k!r}")
+                  seen[k] = v
+              return seen
+          m = json.load(open(os.environ["MANIFEST"], encoding="utf-8"), object_pairs_hook=_no_dupes)
+          if set(m) != {"schema_version", "sefaria_tag", "snapshot_zst_sha256", "engine_fingerprint",
+                        "payload_sha256", "linker_commit", "relink_run_id", "relink_run_attempt",
+                        "relink_request_id", "parent_run_id", "parent_run_attempt"}:
+              sys.exit(f"relink manifest key set mismatch: {sorted(m)}")
+          def need(cond, msg):
+              if not cond:
+                  sys.exit(f"relink manifest: {msg}")
+          def s(k):  # value must be a real str (not a number/bool that stringifies)
+              return isinstance(m[k], str)
+          need(type(m["schema_version"]) is int and m["schema_version"] == 2, "schema_version must be 2")
+          # Identity binding: the manifest must echo OUR per-attempt request id and OUR
+          # exact parent coordinates — a payload from another attempt/build fails here.
+          need(s("relink_request_id") and m["relink_request_id"] == os.environ["EXP_REQUEST_ID"], "relink_request_id != this build's request id")
+          need(type(m["parent_run_id"]) is int and m["parent_run_id"] == int(os.environ["PARENT_RUN_ID"]), "parent_run_id != this build's run id")
+          need(type(m["parent_run_attempt"]) is int and m["parent_run_attempt"] == int(os.environ["PARENT_RUN_ATTEMPT"]), "parent_run_attempt != this build's attempt")
+          need(s("sefaria_tag") and m["sefaria_tag"] == os.environ["EXP_SEFARIA_TAG"], "sefaria_tag != this build's pinned tag")
+          need(s("snapshot_zst_sha256") and m["snapshot_zst_sha256"] == os.environ["EXP_SNAPSHOT_SHA"], "snapshot_zst_sha256 != this build's snapshot")
+          need(s("payload_sha256") and bool(re.fullmatch(r"[0-9a-f]{64}", m["payload_sha256"])), "payload_sha256 is not a sha256")
+          need(s("linker_commit") and bool(re.fullmatch(r"[0-9a-f]{40}", m["linker_commit"])), "linker_commit is not a 40-hex sha")
+          need(m["linker_commit"] == os.environ["RUN_HEAD_SHA"], "linker_commit != the relink run's head_sha")
+          need(type(m["relink_run_id"]) is int and m["relink_run_id"] == int(os.environ["EXP_RUN_ID"]), "relink_run_id != the dispatched run")
+          need(type(m["relink_run_attempt"]) is int and m["relink_run_attempt"] > 0, "relink_run_attempt not a positive int")
+          need(m["relink_run_attempt"] == int(os.environ["RUN_ATTEMPT"]), "relink_run_attempt != the relink run's attempt")
+          need(s("engine_fingerprint") and bool(re.fullmatch(r"[\x20-\x7e]{1,4096}", m["engine_fingerprint"])), "engine_fingerprint must be a non-empty single-line printable-ASCII string")
+          print(f"LINKER_PAYLOAD_SHA256={m['payload_sha256']}")
+          print(f"LINKER_ENGINE_FINGERPRINT={m['engine_fingerprint']}")
+          print(f"LINKER_RELINK_RUN_ID={m['relink_run_id']}")
+          print(f"LINKER_COMMIT={m['linker_commit']}")
+          print(f"LINKER_RELINK_RUN_ATTEMPT={m['relink_run_attempt']}")
+          PY
           tar --use-compress-program=unzstd -xf build/linker/linker_links.zst -C build/linker
           ./gradlew :sefariasqlite:generateLinkerLinks \
             -PseforimDb=$PWD/build/seforim.db \
@@ -740,6 +988,7 @@ jobs:
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
           FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
+          FORDB_TAG: ${{ inputs.fordb_tag }}
         run: |
           set -euo pipefail
           STAGE=release-staging
@@ -774,10 +1023,14 @@ jobs:
           import hashlib, json, os, pathlib, sys
           stage, lineage_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
           lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+          def file_sha256(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              return digest.hexdigest()
           assets = []
           for path in sorted(stage.iterdir(), key=lambda p: p.name.encode()):
-              raw = path.read_bytes()
-              assets.append({"name": path.name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+              assets.append({"name": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)})
           value = {
               "schema_version": 1,
               "correlation_id": os.environ["CORRELATION_ID"],
@@ -788,8 +1041,15 @@ jobs:
               "otzaria_tag": os.environ["OTZARIA_TAG"],
               "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
               "fordb_archive_sha256": os.environ["FORDB_ARCHIVE_SHA"],
+              "fordb_tag": os.environ["FORDB_TAG"],
               "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
               "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
+              "linker_payload_sha256": os.environ["LINKER_PAYLOAD_SHA256"],
+              "linker_engine_fingerprint": os.environ["LINKER_ENGINE_FINGERPRINT"],
+              "linker_relink_run_id": int(os.environ["LINKER_RELINK_RUN_ID"]),
+              "linker_commit": os.environ["LINKER_COMMIT"],
+              "linker_relink_run_attempt": int(os.environ["LINKER_RELINK_RUN_ATTEMPT"]),
+              "linker_relink_request_id": os.environ["RELINK_REQUEST_ID"],
               "lineage_sha256": hashlib.sha256(lineage_path.read_bytes()).hexdigest(),
               "config_sha256": lineage["config_sha256"],
               "source_links_tree_sha256": lineage["source_links_tree_sha256"],
@@ -801,6 +1061,7 @@ jobs:
               encoding="utf-8",
           )
           PY
+          python3 .github/scripts/validate_build_provenance.py "$STAGE/build_provenance.json"
 
       - name: Create draft, verify every uploaded asset, then publish
         id: publish
@@ -813,14 +1074,29 @@ jobs:
           # No --clobber: an existing tag or asset is a lineage conflict.
           gh release create "$RELEASE_TAG" --target "$SOURCE_COMMIT" --title "$RELEASE_TAG" --draft
           gh release upload "$RELEASE_TAG" release-staging/*
-          VERIFY="$RUNNER_TEMP/release-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          rm -rf "$VERIFY" && mkdir -p "$VERIFY"
-          while IFS= read -r file; do
-            name=$(basename "$file")
-            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$VERIFY"
-            test "$(stat -c %s "$VERIFY/$name")" = "$(stat -c %s "$file")"
-            test "$(sha256sum "$VERIFY/$name" | cut -d' ' -f1)" = "$(sha256sum "$file" | cut -d' ' -f1)"
-          done < <(find release-staging -maxdepth 1 -type f -print | sort)
+          verify_remote() {
+            gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/release-assets.json"
+            python3 - "$RUNNER_TEMP/release-assets.json" release-staging <<'PY'
+          import hashlib,json,sys
+          from pathlib import Path
+          remote=json.loads(Path(sys.argv[1]).read_text())["assets"]
+          actual={item["name"]:(item["size"],item.get("digest")) for item in remote}
+          root=Path(sys.argv[2])
+          def file_sha256(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              return digest.hexdigest()
+          local={p.name:(p.stat().st_size,"sha256:"+file_sha256(p)) for p in root.iterdir() if p.is_file()}
+          if actual!=local: raise SystemExit("remote release descriptors do not exactly match staged bytes")
+          PY
+          }
+          verified=false
+          for _ in $(seq 1 12); do
+            if verify_remote; then verified=true; break; fi
+            sleep 5  # asset digest metadata is briefly eventually consistent
+          done
+          [ "$verified" = true ] || { echo "::error::uploaded release descriptors never matched local bytes"; exit 1; }
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
@@ -836,6 +1112,8 @@ jobs:
           OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
+          FORDB_TAG: ${{ inputs.fordb_tag }}
         run: |
           set -euo pipefail
           mkdir -p pipeline-result
@@ -844,10 +1122,14 @@ jobs:
           stage = pathlib.Path("release-staging")
           provenance_path = stage / "build_provenance.json"
           provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+          def file_sha256(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024*1024),b""): digest.update(chunk)
+              return digest.hexdigest()
           assets = []
           for path in sorted(stage.iterdir(), key=lambda item: item.name.encode("utf-8")):
-              raw = path.read_bytes()
-              assets.append({"name": path.name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+              assets.append({"name": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)})
           value = {
               "schema_version": 1,
               "status": "published",
@@ -860,6 +1142,8 @@ jobs:
               "sefaria_archive_sha256": os.environ["SEFARIA_ARCHIVE_SHA"],
               "otzaria_tag": os.environ["OTZARIA_TAG"],
               "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
+              "fordb_archive_sha256": os.environ["FORDB_ARCHIVE_SHA"],
+              "fordb_tag": os.environ["FORDB_TAG"],
               "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
               "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
               "release_tag": os.environ["RELEASE_TAG"],
@@ -880,10 +1164,10 @@ jobs:
       - name: Upload exact child result
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-result
+          name: pipeline-result-${{ github.run_attempt }}
           path: pipeline-result/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
       # Release the RAM tmpfs no matter how the job ended. By now assets are
       # already uploaded and staged on real disk, so discarding build/ is safe;
@@ -907,11 +1191,110 @@ jobs:
         if: always()
         run: rm -rf prev-dbs patches release-staging prior-versions.tsv
 
+      # If this build ends while the relink it dispatched is still pending/running — the
+      # build hit its own timeout while waiting, failed in Phase-2, or was cancelled —
+      # cancel OUR child so it can't outlive us as an orphan holding the linker
+      # host/session (its own ceiling is 8h). Identity is the per-attempt request id
+      # stamped into both run-names: matching is FULL-title equality, so this attempt's
+      # cleanup can never touch another attempt's (or any other) runs. Order: cancel the
+      # kaggle-relink DISPATCHER first and wait (bounded) until it is terminal — its own
+      # SIGTERM trap cancels a child it already queued — then cancel any relink worker,
+      # then re-scan a bounded window for a child that appeared mid-sweep. Anything still
+      # invisible is reaped by reconcile-pipeline (keyed on the same request id).
+      # Best-effort: never fails the job, and runs after the result artifact upload.
+      - name: Cancel any in-flight relink for this build (no orphaned linker run)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          set -uo pipefail
+          # The identity vars exist only if the dispatch step ran (GITHUB_ENV) — before
+          # that point there is nothing to clean.
+          [ -n "${RELINK_REQUEST_ID:-}" ] || { echo "relink was never dispatched — nothing to clean."; exit 0; }
+          export RELINK_TITLE KAGGLE_TITLE
+          # Fully paginated REST per pre-terminal status — an old orphan can never be
+          # pushed out of a "last N runs" window by fresh completed runs. QUERY_OK
+          # tracks every listing: a failed scan must end in ORPHAN_INTENT for the
+          # reconciler, never in a false "cleanup done".
+          QUERY_OK=1
+          list_live() {  # $1 workflow file, $2 exact title → space-joined live run ids
+            local wf="$1" status rows out="" failed=0
+            for status in requested waiting pending queued in_progress; do
+              if ! rows=$(TITLE="$2" gh api --paginate -X GET "repos/Otzaria/LinkerToOtzaria/actions/workflows/$wf/runs" \
+                -f status="$status" -f per_page=100 \
+                --jq '.workflow_runs[] | select(.display_title == env.TITLE) | (.id|tostring)' 2>/dev/null); then
+                failed=1
+                continue
+              fi
+              [ -z "$rows" ] || out+="$rows"$'\n'
+            done
+            printf '%s' "$out" | awk 'NF && !seen[$0]++' | tr '\n' ' '
+            return "$failed"
+          }
+          wait_terminal() {  # $1 run id — bounded wait for the cancel to actually land
+            local status
+            for _ in $(seq 1 18); do
+              status=$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$1" --jq .status 2>/dev/null || echo unknown)
+              [ "$status" = "completed" ] && return 0
+              sleep 5
+            done
+            echo "::warning::run $1 is still not terminal after 90s"
+          }
+          cancel_live() {  # $1 workflow, $2 exact title
+            local ids rid
+            if ! ids=$(list_live "$1" "$2"); then
+              QUERY_OK=0
+              ids=""
+            fi
+            for rid in $ids; do
+              echo "Cancelling in-flight $1 run $rid ($2)"
+              gh run cancel "$rid" -R Otzaria/LinkerToOtzaria || true
+              wait_terminal "$rid"
+            done
+          }
+          scan_all() {
+            local relink_ids="" kaggle_ids=""
+            if ! relink_ids=$(list_live relink.yml "$RELINK_TITLE"); then QUERY_OK=0; relink_ids=""; fi
+            if ! kaggle_ids=$(list_live kaggle-relink.yml "$KAGGLE_TITLE"); then QUERY_OK=0; kaggle_ids=""; fi
+            LIVE="$relink_ids $kaggle_ids"
+          }
+          # Dispatcher first (it can spawn a child), waited to terminal; then the worker.
+          cancel_live kaggle-relink.yml "$KAGGLE_TITLE"
+          cancel_live relink.yml "$RELINK_TITLE"
+          # Bounded re-scan: a dispatcher cancelled above may have created its child just
+          # before dying, and the API lists new runs with a lag. Three short rounds.
+          for _ in 1 2 3; do
+            scan_all
+            [ -z "${LIVE// /}" ] && break
+            cancel_live kaggle-relink.yml "$KAGGLE_TITLE"
+            cancel_live relink.yml "$RELINK_TITLE"
+            sleep 10
+          done
+          scan_all
+          if [ -n "${LIVE// /}" ]; then
+            echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID runs='$LIVE' — cleanup could not terminate everything; reconcile-pipeline reaps by this request id."
+          elif [ "$QUERY_OK" -ne 1 ]; then
+            echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID query_ok=0 — one or more scans failed; a live run may be invisible. reconcile-pipeline reaps by this request id."
+          else
+            echo "relink orphan-cleanup done for request=$RELINK_REQUEST_ID."
+          fi
+
+      - name: Release cross-repo host lease after child cleanup
+        if: always()
+        run: |
+          state="${HOST_LEASE_STATE:-$RUNNER_TEMP/host-lease.json}"
+          if [ -f "$state" ]; then
+            python3 .github/scripts/host_lease.py release --state "$state"
+          else
+            echo "No local host lease state."
+          fi
+
   reuse-result:
     name: Return the already-published exact build
     needs: reconcile
     if: needs.reconcile.outputs.reuse == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Write exact child result
         env:
@@ -924,6 +1307,8 @@ jobs:
           OTZARIA_ASSET_SHA: ${{ inputs.otzaria_asset_sha256 }}
           EXPECTED_LINKS_COMMIT: ${{ inputs.expected_links_commit }}
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
+          FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
+          FORDB_TAG: ${{ inputs.fordb_tag }}
           RELEASE_TAG: ${{ needs.reconcile.outputs.release_tag }}
           BUILD_PROVENANCE_SHA: ${{ needs.reconcile.outputs.build_provenance_sha256 }}
           LINEAGE_SHA: ${{ needs.reconcile.outputs.lineage_sha256 }}
@@ -948,6 +1333,8 @@ jobs:
               "sefaria_archive_sha256": os.environ["SEFARIA_ARCHIVE_SHA"],
               "otzaria_tag": os.environ["OTZARIA_TAG"],
               "otzaria_asset_sha256": os.environ["OTZARIA_ASSET_SHA"],
+              "fordb_archive_sha256": os.environ["FORDB_ARCHIVE_SHA"],
+              "fordb_tag": os.environ["FORDB_TAG"],
               "expected_links_commit": os.environ["EXPECTED_LINKS_COMMIT"],
               "otzaria_target_commit": os.environ["OTZARIA_TARGET_COMMIT"],
               "release_tag": os.environ["RELEASE_TAG"],
@@ -966,10 +1353,33 @@ jobs:
           sha256sum pipeline-result/pipeline-result.json | cut -d' ' -f1 > pipeline-result/pipeline-result.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: pipeline-result
+          name: pipeline-result-${{ github.run_attempt }}
           path: pipeline-result/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
+
+  saga-callback:
+    name: Notify event-driven parent after exact result artifact exists
+    needs: [build-and-release, reuse-result]
+    if: ${{ always() && inputs.saga_run_id != '' && (needs.build-and-release.result == 'success' || needs.reuse-result.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch zero-trust lookup key
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          SAGA_RUN_ID: ${{ inputs.saga_run_id }}
+          SAGA_RUN_ATTEMPT: ${{ inputs.saga_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$SAGA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SAGA_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          payload="$(jq -cn --arg correlation_id "$CORRELATION_ID" \
+            --argjson saga_run_id "$SAGA_RUN_ID" --argjson child_run_id "$GITHUB_RUN_ID" \
+            --argjson saga_run_attempt "$SAGA_RUN_ATTEMPT" --argjson child_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{event_type:"seforim-published",client_payload:{correlation_id:$correlation_id,saga_run_id:$saga_run_id,saga_run_attempt:$saga_run_attempt,child_run_id:$child_run_id,child_run_attempt:$child_run_attempt}}')"
+          gh api repos/Otzaria/otzaria-library/dispatches --method POST --input - <<<"$payload"
 
   refresh-release-manifest:
     name: Refresh release-manifest.json after publish or verified reuse
@@ -978,6 +1388,11 @@ jobs:
       always() && needs.reconcile.result == 'success' &&
       (needs.build-and-release.result == 'success' || needs.reuse-result.result == 'success')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: seforim-release-manifest-writer
+      cancel-in-progress: false
+      queue: max
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -994,7 +1409,9 @@ jobs:
           else
             LATEST_ARG=(--argjson latest null)
           fi
-          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 1000)
+          ALL_RELEASES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft|not) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
+            | jq -sc '.')
           # Derive the timestamp from immutable release state.  A verified reuse
           # must regenerate the same bytes instead of committing a wall-clock-only
           # change every time the parent pipeline is retried.
