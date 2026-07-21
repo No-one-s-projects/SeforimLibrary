@@ -91,6 +91,15 @@ on:
         description: 'Exact parent pipeline correlation id'
         type: string
         required: true
+      relink_recovery_run_id:
+        description: |
+          Optional exact successful LinkerToOtzaria relink recovery run. When set,
+          rebuild the DB from the pinned inputs but consume this run instead of
+          dispatching another GPU session. The run, its failed parent, request id,
+          snapshot digest, commit, attempt and artifacts are all verified fail-closed.
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -144,6 +153,7 @@ jobs:
           CORRELATION_ID: ${{ inputs.correlation_id }}
           SAGA_RUN_ID: ${{ inputs.saga_run_id }}
           SAGA_RUN_ATTEMPT: ${{ inputs.saga_run_attempt }}
+          RELINK_RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -160,6 +170,7 @@ jobs:
           [[ "$CORRELATION_ID" =~ ^sefaria:([1-9][0-9]*):([1-9][0-9]*):([A-Za-z0-9._-]{1,100}):([0-9a-f]{64})$ ]]
           [[ "${BASH_REMATCH[3]}" == "$SEFARIA_TAG" ]]
           [[ "${BASH_REMATCH[4]}" == "$SEFARIA_METADATA_SHA" ]]
+          [[ -z "$RELINK_RECOVERY_RUN_ID" || "$RELINK_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           if [[ -n "$SAGA_RUN_ID" || -n "$SAGA_RUN_ATTEMPT" ]]; then
             [[ "$SAGA_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             [[ "$SAGA_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
@@ -687,9 +698,63 @@ jobs:
           CORRELATION_ID: ${{ inputs.correlation_id }}
           SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
+          RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
+          if [ -n "$RECOVERY_RUN_ID" ]; then
+            # Explicit recovery is deliberately narrower than normal reuse: accept one
+            # exact, already-successful relink-recovery run whose title binds it to one
+            # exact failed build attempt with this correlation. The payload manifest is
+            # independently checked against the freshly regenerated snapshot below.
+            [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::relink_recovery_run_id must be a positive integer"; exit 1; }
+            RECOVERY_JSON="$RUNNER_TEMP/relink-recovery-run.json"
+            gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RECOVERY_RUN_ID" > "$RECOVERY_JSON"
+            IFS=$'\t' read -r RECOVERY_STATUS RECOVERY_CONCLUSION RECOVERY_EVENT RECOVERY_PATH RECOVERY_ATTEMPT RECOVERY_HEAD RECOVERY_TITLE \
+              < <(jq -er '[.status, .conclusion, .event, .path, (.run_attempt|tostring), .head_sha, .display_title] | @tsv' "$RECOVERY_JSON")
+            [ -n "$RECOVERY_TITLE" ] || { echo "::error::malformed relink recovery run metadata"; exit 1; }
+            [ "$RECOVERY_STATUS" = completed ] && [ "$RECOVERY_CONCLUSION" = success ] || { echo "::error::relink recovery run is not completed:success"; exit 1; }
+            [ "$RECOVERY_EVENT" = workflow_dispatch ] && [ "$RECOVERY_PATH" = .github/workflows/relink.yml ] || { echo "::error::relink recovery run has an unexpected event or workflow"; exit 1; }
+            [[ "$RECOVERY_ATTEMPT" =~ ^[1-9][0-9]*$ ]] && [[ "$RECOVERY_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::relink recovery run has malformed attempt or head SHA"; exit 1; }
+            if [[ "$RECOVERY_TITLE" =~ ^relink-recovery\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
+              RELINK_REQUEST_ID="${BASH_REMATCH[1]}"
+              EXPECTED_PARENT_RUN_ID="${BASH_REMATCH[2]}"
+              EXPECTED_PARENT_RUN_ATTEMPT="${BASH_REMATCH[3]}"
+            else
+              echo "::error::run $RECOVERY_RUN_ID is not an exactly correlated recovery run"; exit 1
+            fi
+
+            PARENT_JSON="$RUNNER_TEMP/relink-recovery-parent.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EXPECTED_PARENT_RUN_ID" > "$PARENT_JSON"
+            EXPECTED_PARENT_TITLE="manual-generate-release correlation=$CORRELATION_ID"
+            jq -e --argjson attempt "$EXPECTED_PARENT_RUN_ATTEMPT" --arg title "$EXPECTED_PARENT_TITLE" '
+              .status == "completed" and .conclusion == "failure" and
+              .event == "workflow_dispatch" and .path == ".github/workflows/manual-generate-release.yml" and
+              .run_attempt == $attempt and .display_title == $title
+            ' "$PARENT_JSON" >/dev/null || { echo "::error::recovery parent is not the exact failed build attempt for this correlation"; exit 1; }
+
+            RECOVERY_ARTIFACTS="$RUNNER_TEMP/relink-recovery-artifacts.json"
+            gh api --paginate "repos/Otzaria/LinkerToOtzaria/actions/runs/$RECOVERY_RUN_ID/artifacts?per_page=100" --slurp > "$RECOVERY_ARTIFACTS"
+            RECOVERY_ARTIFACT_COUNT=$(jq --arg name "linker-links-$RECOVERY_ATTEMPT" '[.[].artifacts[] | select(.name == $name and (.expired|not) and .size_in_bytes > 0)] | length' "$RECOVERY_ARTIFACTS")
+            [ "$RECOVERY_ARTIFACT_COUNT" -eq 1 ] || { echo "::error::recovery run must have exactly one live linker-links artifact"; exit 1; }
+            PARENT_ARTIFACTS="$RUNNER_TEMP/relink-recovery-parent-artifacts.json"
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$EXPECTED_PARENT_RUN_ID/artifacts?per_page=100" --slurp > "$PARENT_ARTIFACTS"
+            PARENT_SNAPSHOT_COUNT=$(jq --arg name "lines-snapshot-$EXPECTED_PARENT_RUN_ATTEMPT" '[.[].artifacts[] | select(.name == $name and (.expired|not) and .size_in_bytes > 0)] | length' "$PARENT_ARTIFACTS")
+            [ "$PARENT_SNAPSHOT_COUNT" -eq 1 ] || { echo "::error::recovery parent must retain exactly one live source snapshot artifact"; exit 1; }
+
+            RUN="$RECOVERY_RUN_ID"
+            {
+              echo "RELINK_REQUEST_ID=$RELINK_REQUEST_ID"
+              echo "RELINK_TITLE=$RECOVERY_TITLE"
+            } >> "$GITHUB_ENV"
+            {
+              echo "run_id=$RUN"
+              echo "request_id=$RELINK_REQUEST_ID"
+              echo "parent_run_id=$EXPECTED_PARENT_RUN_ID"
+              echo "parent_run_attempt=$EXPECTED_PARENT_RUN_ATTEMPT"
+            } >> "$GITHUB_OUTPUT"
+            echo "Reusing exact successful recovery relink $RUN for failed parent $EXPECTED_PARENT_RUN_ID:$EXPECTED_PARENT_RUN_ATTEMPT"
+          else
           # Per-attempt correlation identity: a deterministic sha256 over this exact
           # attempt + the saga correlation + the pinned inputs + the target. A rerun
           # (new attempt) yields a DIFFERENT id, so discovery/cleanup of this attempt
@@ -791,7 +856,12 @@ jobs:
           done
           [ -n "$RUN" ] || { echo "::error::relink run ($RELINK_TITLE) never appeared"; exit 1; }
           echo "relink run: $RUN"
-          echo "run_id=$RUN" >> "$GITHUB_OUTPUT"
+          {
+            echo "run_id=$RUN"
+            echo "request_id=$RELINK_REQUEST_ID"
+            echo "parent_run_id=$GITHUB_RUN_ID"
+            echo "parent_run_attempt=$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
           # Low-frequency resilient wait: `gh run watch` polls every 3s, which can
           # exhaust the shared 5k/hr API quota on an hours-long relink; transient
           # API errors must not kill an otherwise-healthy build. A run stuck in
@@ -822,6 +892,7 @@ jobs:
               --lock /run/lock/otzaria/host-heavy.lock \
               --state "$HOST_LEASE_STATE" --ttl 43800
           fi
+          fi
 
       # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
       # that exact run (not "latest release") so the handshake is fully deterministic.
@@ -832,6 +903,9 @@ jobs:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
           SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           RELINK_RUN_ID: ${{ steps.relink.outputs.run_id }}
+          EXPECTED_RELINK_REQUEST_ID: ${{ steps.relink.outputs.request_id }}
+          EXPECTED_RELINK_PARENT_RUN_ID: ${{ steps.relink.outputs.parent_run_id }}
+          EXPECTED_RELINK_PARENT_RUN_ATTEMPT: ${{ steps.relink.outputs.parent_run_attempt }}
         run: |
           set -euo pipefail
           rm -rf build/linker && mkdir -p build/linker
@@ -855,7 +929,7 @@ jobs:
           # real head_sha / attempt. A forged or drifted manifest fails here, fail-closed.
           MANIFEST="$M" EXP_SEFARIA_TAG="$SEFARIA_TAG" EXP_SNAPSHOT_SHA="$SNAPSHOT_ZST_SHA256" \
           EXP_RUN_ID="$RELINK_RUN_ID" RUN_HEAD_SHA="$RUN_HEAD_SHA" RUN_ATTEMPT="$RUN_ATTEMPT" \
-          EXP_REQUEST_ID="$RELINK_REQUEST_ID" PARENT_RUN_ID="$GITHUB_RUN_ID" PARENT_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+          EXP_REQUEST_ID="$EXPECTED_RELINK_REQUEST_ID" PARENT_RUN_ID="$EXPECTED_RELINK_PARENT_RUN_ID" PARENT_RUN_ATTEMPT="$EXPECTED_RELINK_PARENT_RUN_ATTEMPT" \
           python3 - >> "$GITHUB_ENV" <<'PY'
           import json, os, re, sys
           def _no_dupes(pairs):
@@ -876,8 +950,9 @@ jobs:
           def s(k):  # value must be a real str (not a number/bool that stringifies)
               return isinstance(m[k], str)
           need(type(m["schema_version"]) is int and m["schema_version"] == 2, "schema_version must be 2")
-          # Identity binding: the manifest must echo OUR per-attempt request id and OUR
-          # exact parent coordinates — a payload from another attempt/build fails here.
+          # Identity binding: the manifest must echo the selected request id and exact
+          # parent coordinates. In recovery mode those are the terminal failed build
+          # named by the recovery run, never the new rebuild's coordinates.
           need(s("relink_request_id") and m["relink_request_id"] == os.environ["EXP_REQUEST_ID"], "relink_request_id != this build's request id")
           need(type(m["parent_run_id"]) is int and m["parent_run_id"] == int(os.environ["PARENT_RUN_ID"]), "parent_run_id != this build's run id")
           need(type(m["parent_run_attempt"]) is int and m["parent_run_attempt"] == int(os.environ["PARENT_RUN_ATTEMPT"]), "parent_run_attempt != this build's attempt")
