@@ -58,4 +58,24 @@ class SefariaCleanSefariaLineTest {
     fun handlesSelfClosingAndUppercaseBr() {
         assertEquals("a b c", cleanSefariaLine("a<br/>b<BR />c"))
     }
+
+    @Test
+    fun keepsTrailingBrOfOpenParasha() {
+        // MAM Deuteronomy 6:3 — the trailing <br> after {פ} is the open-parasha
+        // break; without it the next verse runs on in continuous reading.
+        assertEquals(
+            """חָלָב וּדְבָשׁ׃&nbsp;<span class="mam-spi-pe">{פ}</span><br>""",
+            cleanSefariaLine("""חָלָב וּדְבָשׁ׃&nbsp;<span class="mam-spi-pe">{פ}</span><br>""")
+        )
+    }
+
+    @Test
+    fun collapsesInnerBrButKeepsTrailingOne() {
+        assertEquals("a b<br>", cleanSefariaLine("a<br>b<br>"))
+    }
+
+    @Test
+    fun dropsBrOnlyLine() {
+        assertEquals("", cleanSefariaLine("<br><br>"))
+    }
 }
