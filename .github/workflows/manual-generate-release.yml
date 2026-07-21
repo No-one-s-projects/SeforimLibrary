@@ -1032,7 +1032,7 @@ jobs:
           for path in sorted(stage.iterdir(), key=lambda p: p.name.encode()):
               assets.append({"name": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)})
           value = {
-              "schema_version": 1,
+              "schema_version": 2,
               "correlation_id": os.environ["CORRELATION_ID"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "sefaria_tag": os.environ["SEFARIA_TAG"],

@@ -16,7 +16,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
     def value(self):
         sha = "a" * 64
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "correlation_id": f"sefaria:1:2:export-v1:{sha}",
             "source_commit": "b" * 40,
             "sefaria_tag": "export-v1",
@@ -56,9 +56,26 @@ class BuildProvenanceContractTest(unittest.TestCase):
             value = contract.load(self.write(tmp))
             contract.validate(value)
 
+    def test_published_v1_contract_remains_readable_but_cannot_claim_v2_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.value()
+            value["schema_version"] = 1
+            for key in contract.V2_KEYS - contract.V1_KEYS:
+                del value[key]
+            contract.validate(contract.load(self.write(tmp, value)))
+
+            value["fordb_archive_sha256"] = "e" * 64
+            with self.assertRaises(ValueError):
+                contract.load(self.write(tmp, value))
+
+            del value["fordb_archive_sha256"]
+            value["assets"][0]["size"] = 0
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
     def test_duplicate_and_boolean_schema_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":1}\n'
+            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":2}\n'
             with self.assertRaises(ValueError):
                 contract.load(self.write(tmp, raw=raw.encode()))
             value = self.value()
