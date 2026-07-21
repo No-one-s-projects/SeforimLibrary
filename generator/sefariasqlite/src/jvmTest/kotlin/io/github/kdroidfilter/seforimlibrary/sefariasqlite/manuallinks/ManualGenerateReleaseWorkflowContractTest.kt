@@ -72,6 +72,9 @@ class ManualGenerateReleaseWorkflowContractTest {
             workflow.contains("python3 .pipeline-control/.github/scripts/host_lease.py"),
             "host safety fixes must come from the immutable workflow revision",
         )
+        assertTrue(workflow.contains("Bootstrap durable cross-repo host lease"))
+        assertTrue(workflow.contains("bootstrap_host_lock.sh"))
+        assertTrue(workflow.contains(".github/host/otzaria-pipeline.tmpfiles.conf"))
     }
 
     @Test

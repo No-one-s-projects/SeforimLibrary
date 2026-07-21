@@ -306,8 +306,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .pipeline-control
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/scripts
+            .github/host
           persist-credentials: false
+
+      - name: Bootstrap durable cross-repo host lease
+        run: >-
+          bash .pipeline-control/.github/scripts/bootstrap_host_lock.sh
+          .pipeline-control/.github/host/otzaria-pipeline.tmpfiles.conf
 
       - name: Disk before build
         run: df -h
