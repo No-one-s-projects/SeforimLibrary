@@ -20,15 +20,26 @@ private val OTZAR_MARKUP_REGEX = Regex("""@\d{2}([^}]*)\}""")
 // continuous. Collapse them to a single space so paragraphs read as prose.
 private val HTML_LINE_BREAK_REGEX = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
 
+// A `<br>` at the *end* of a line is not an in-paragraph break: Sefaria's MAM
+// Tanach emits it after `{פ}` to mark an open parasha (פרשה פתוחה), which the
+// reader renders as the break before the next verse. Collapsing it swallowed
+// that break, so only breaks with text after them are collapsed.
+private val TRAILING_HTML_LINE_BREAK_REGEX =
+    Regex("""(?:\s*<br\s*/?>)+\s*$""", RegexOption.IGNORE_CASE)
+
 internal fun cleanSefariaLine(raw: String): String {
     var s = if (raw.contains('\n')) raw.replace("\n", "") else raw
     if (OTZAR_MARKUP_REGEX.containsMatchIn(s)) {
         s = OTZAR_MARKUP_REGEX.replace(s, "$1")
     }
     if (HTML_LINE_BREAK_REGEX.containsMatchIn(s)) {
-        s = HTML_LINE_BREAK_REGEX.replace(s, " ")
+        val trailing = TRAILING_HTML_LINE_BREAK_REGEX.find(s)
+        val body = if (trailing != null) s.substring(0, trailing.range.first) else s
         // Collapse any double spaces we just introduced
-        s = s.replace(Regex(" {2,}"), " ").trim()
+        s = HTML_LINE_BREAK_REGEX.replace(body, " ").replace(Regex(" {2,}"), " ").trim()
+        if (trailing != null && s.isNotEmpty()) {
+            s += "<br>"
+        }
     }
     // Inline any Sefaria textimages as base64 data URIs (no-op if the embedder
     // hasn't been prefetched or the line contains no such URL).
