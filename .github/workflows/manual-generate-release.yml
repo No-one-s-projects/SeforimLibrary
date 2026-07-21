@@ -645,12 +645,19 @@ jobs:
       - name: Dump lines snapshot for the linker
         run: |
           set -euo pipefail
+          # The raw snapshot is ~5.7 GB and exists only as zstd input.  Keeping
+          # it beside the 7.5 GB DB on the 16 GB tmpfs leaves almost no room for
+          # the compressed stream and forces needless swap pressure.  Write the
+          # transient raw file to the runner's large disk; retain only its
+          # content-addressed compressed handoff in RAM.
+          RAW_SNAPSHOT="$RUNNER_TEMP/lines-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db"
+          rm -f "$RAW_SNAPSHOT"
+          trap 'rm -f "$RAW_SNAPSHOT"' EXIT
           ./gradlew :packaging:dumpLines \
             -PseforimDb=$PWD/build/seforim.db \
-            -PlinesSnapshot=$PWD/build/lines_snapshot.db \
+            -PlinesSnapshot="$RAW_SNAPSHOT" \
             --no-daemon --stacktrace
-          zstd -T0 -19 -f -o build/lines_snapshot.db.zst build/lines_snapshot.db
-          rm -f build/lines_snapshot.db
+          zstd -T0 -19 -f -o build/lines_snapshot.db.zst "$RAW_SNAPSHOT"
           # Pin the snapshot handoff: the relink verifies the artifact it downloads
           # against this digest, so it can only link the exact snapshot we produced.
           echo "SNAPSHOT_ZST_SHA256=$(sha256sum build/lines_snapshot.db.zst | cut -d' ' -f1)" >> "$GITHUB_ENV"

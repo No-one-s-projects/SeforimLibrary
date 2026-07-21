@@ -75,6 +75,9 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("Bootstrap durable cross-repo host lease"))
         assertTrue(workflow.contains("bootstrap_host_lock.sh"))
         assertTrue(workflow.contains(".github/host/otzaria-pipeline.tmpfiles.conf"))
+        assertTrue(workflow.contains("RAW_SNAPSHOT=\"\$RUNNER_TEMP/lines-snapshot-"))
+        assertTrue(workflow.contains("-PlinesSnapshot=\"\$RAW_SNAPSHOT\""))
+        assertFalse(workflow.contains("-PlinesSnapshot=\$PWD/build/lines_snapshot.db"))
     }
 
     @Test
