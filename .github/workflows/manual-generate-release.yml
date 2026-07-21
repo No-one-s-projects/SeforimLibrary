@@ -123,7 +123,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_commit }}
+          # Reconciliation is control-plane work.  It must use the validator
+          # shipped with this workflow run, not the older payload commit.
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Validate local orchestration boundary contracts
         run: python3 .github/scripts/test_build_provenance.py && python3 .github/scripts/test_otzaria_provenance.py && python3 .github/scripts/test_host_safety.py
@@ -295,6 +297,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Keep control-plane validators/lease helpers on the workflow revision
+      # while the payload tree above remains pinned to source_commit.  Without
+      # this split, a contract fix pushed after source selection is silently
+      # replaced by the old scripts during checkout.
+      - name: Checkout immutable pipeline control scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .pipeline-control
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
       - name: Disk before build
         run: df -h
 
@@ -335,9 +349,9 @@ jobs:
             exit 1
           }
           echo "HOST_LEASE_STATE=$RUNNER_TEMP/host-lease.json" >> "$GITHUB_ENV"
-          python3 .github/scripts/host_lease.py start --lock "$LEASE" \
+          python3 .pipeline-control/.github/scripts/host_lease.py start --lock "$LEASE" \
             --state "$RUNNER_TEMP/host-lease.json" --ttl 43800
-          python3 .github/scripts/reap_linker_ner.py
+          python3 .pipeline-control/.github/scripts/reap_linker_ner.py
 
           # Exclusivity: this host runs three self-hosted runners (SeforimLibrary,
           # otzaria, SefariaExport). A RAM-heavy release build must not share the
@@ -387,7 +401,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Install DB workflow dependencies
-        run: bash .github/scripts/install-db-workflow-deps.sh
+        run: bash .pipeline-control/.github/scripts/install-db-workflow-deps.sh
 
       # Resolve both source archives by immutable tag and digest before any DB
       # work. No fetcher in the build is allowed to consult /releases/latest.
@@ -433,7 +447,7 @@ jobs:
             --pattern release_metadata.json --dir "$INPUTS/sefaria-assets"
           SEFARIA_METADATA="$INPUTS/sefaria-assets/release_metadata.json"
           echo "$SEFARIA_METADATA_SHA  $SEFARIA_METADATA" | sha256sum -c -
-          python3 .github/scripts/validate-sefaria-release-metadata.py \
+          python3 .pipeline-control/.github/scripts/validate-sefaria-release-metadata.py \
             "$SEFARIA_METADATA" "$SEFARIA_TAG" "$SEFARIA_ARCHIVE_SHA"
           : > "$INPUTS/sefaria-archive.tar.zst"
           while IFS=$'\t' read -r name size sha; do
@@ -456,7 +470,7 @@ jobs:
           gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
             --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
           PROVENANCE="$INPUTS/otzaria-assets/otzaria_release_provenance.json"
-          python3 .github/scripts/validate_otzaria_provenance.py "$PROVENANCE" \
+          python3 .pipeline-control/.github/scripts/validate_otzaria_provenance.py "$PROVENANCE" \
             --expected-target "$EXPECTED_LINKS_COMMIT" \
             --expected-tag "$OTZARIA_TAG" \
             --expected-asset-sha256 "$OTZARIA_ASSET_SHA"
@@ -716,7 +730,7 @@ jobs:
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
             server)
               # Serialize, do not delegate: release our real flock before dispatch.
-              python3 .github/scripts/host_lease.py release --state "$HOST_LEASE_STATE"
+              python3 .pipeline-control/.github/scripts/host_lease.py release --state "$HOST_LEASE_STATE"
               gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
                 -f library_run_id="$GITHUB_RUN_ID" -f target=server \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
@@ -790,7 +804,7 @@ jobs:
           if [ "$SERIAL_LINKER_TARGET" = server ]; then
             # The child is terminal now. Reacquire before this job touches the DB
             # again; if another heavy phase won the race, fail rather than overlap.
-            python3 .github/scripts/host_lease.py start \
+            python3 .pipeline-control/.github/scripts/host_lease.py start \
               --lock /run/lock/otzaria/host-heavy.lock \
               --state "$HOST_LEASE_STATE" --ttl 43800
           fi
@@ -1061,7 +1075,7 @@ jobs:
               encoding="utf-8",
           )
           PY
-          python3 .github/scripts/validate_build_provenance.py "$STAGE/build_provenance.json"
+          python3 .pipeline-control/.github/scripts/validate_build_provenance.py "$STAGE/build_provenance.json"
 
       - name: Create draft, verify every uploaded asset, then publish
         id: publish
@@ -1284,7 +1298,7 @@ jobs:
         run: |
           state="${HOST_LEASE_STATE:-$RUNNER_TEMP/host-lease.json}"
           if [ -f "$state" ]; then
-            python3 .github/scripts/host_lease.py release --state "$state"
+            python3 .pipeline-control/.github/scripts/host_lease.py release --state "$state"
           else
             echo "No local host lease state."
           fi

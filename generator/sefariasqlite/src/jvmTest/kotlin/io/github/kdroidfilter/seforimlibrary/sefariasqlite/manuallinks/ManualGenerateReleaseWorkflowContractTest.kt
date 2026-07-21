@@ -60,6 +60,18 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("select(.draft|not)"), "drafts must not advance db_version")
         assertFalse(workflow.contains("-name database_export -print -quit"))
         assertFalse(workflow.contains("gh api \"repos/\$GITHUB_REPOSITORY/releases?per_page=100\" >"))
+        assertTrue(
+            workflow.contains("path: .pipeline-control"),
+            "build payload and orchestration scripts must be checked out separately",
+        )
+        assertTrue(
+            workflow.contains("python3 .pipeline-control/.github/scripts/validate_build_provenance.py"),
+            "the pinned payload checkout must not downgrade the active provenance validator",
+        )
+        assertTrue(
+            workflow.contains("python3 .pipeline-control/.github/scripts/host_lease.py"),
+            "host safety fixes must come from the immutable workflow revision",
+        )
     }
 
     @Test
