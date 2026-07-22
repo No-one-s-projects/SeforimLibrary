@@ -21,16 +21,22 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             self.workflow.index("      - name: Mount RAM-backed build dir (tmpfs)\n"),
         )
         self.assertIn("[ \"$code\" = 422 ]", probe)
+        self.assertIn("RELEASE_AUTOMATIC_WRITABLE", probe)
+        self.assertIn("RELEASE_CROSS_REPO_WRITABLE", probe)
         self.assertIn("RELEASE_TOKEN_KIND=automatic", probe)
         self.assertIn("RELEASE_TOKEN_KIND=cross-repo", probe)
 
-    def test_publisher_uses_only_the_preflight_selected_credential(self):
+    def test_publisher_reconciles_and_falls_back_only_to_preflighted_credentials(self):
         publish = self.step("Create draft, verify every uploaded asset, then publish")
         self.assertIn("AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}", publish)
         self.assertIn("CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}", publish)
-        self.assertIn('case "$RELEASE_TOKEN_KIND" in', publish)
+        self.assertIn('use_token "$RELEASE_TOKEN_KIND"', publish)
+        self.assertIn('switch_token()', publish)
         self.assertIn('export GH_TOKEN="$AUTOMATIC_TOKEN"', publish)
         self.assertIn('export GH_TOKEN="$CROSS_REPO_TOKEN"', publish)
+        self.assertIn('exact-empty-draft', publish)
+        self.assertIn('for asset_path in release-staging/*', publish)
+        self.assertNotIn('gh release upload "$RELEASE_TAG" "$asset_path" --clobber', publish)
 
     def test_recovery_sets_both_cleanup_titles_and_cleanup_defaults_them(self):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
