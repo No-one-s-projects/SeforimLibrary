@@ -48,6 +48,23 @@ class SefariaEnglishSectionNamesTest {
     }
 
     @Test
+    fun aliyotAreLabelledByOrdinal() {
+        // Sefaria's Parasha alt-structure enumerates the seven weekly aliyot;
+        // readers name them by ordinal (ראשון..שביעי), not "עליה" + gematria.
+        assertEquals("עליה", mapSectionNameToHebrew("Aliyah"))
+        assertEquals("ראשון", aliyahOrdinalLabel(1))
+        assertEquals("שני", aliyahOrdinalLabel(2))
+        assertEquals("שלישי", aliyahOrdinalLabel(3))
+        assertEquals("רביעי", aliyahOrdinalLabel(4))
+        assertEquals("חמישי", aliyahOrdinalLabel(5))
+        assertEquals("שישי", aliyahOrdinalLabel(6))
+        assertEquals("שביעי", aliyahOrdinalLabel(7))
+        // Outside the customary 1..7 range the caller keeps its generic label.
+        assertNull(aliyahOrdinalLabel(0))
+        assertNull(aliyahOrdinalLabel(8))
+    }
+
+    @Test
     fun leavesUnknownNamesUnchangedAndHandlesBlank() {
         // Genuinely unknown names pass through verbatim.
         assertEquals("Xyzzy", mapSectionNameToHebrew("Xyzzy"))

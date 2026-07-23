@@ -268,12 +268,15 @@ internal class SefariaAltTocBuilder(
 
             fun buildChildLabel(base: String?, idx: Int, addressValue: Int?, addressType: String?): String {
                 val numericValue = (addressValue ?: (idx + 1)).coerceAtLeast(1)
+                val hebBase = mapBaseToHebrew(base)
+                if (hebBase == ALIYAH_SECTION_LABEL) {
+                    aliyahOrdinalLabel(numericValue)?.let { return it }
+                }
                 val suffix = if (addressType.equals("Talmud", ignoreCase = true)) {
                     toDaf(numericValue)
                 } else {
                     toGematria(numericValue)
                 }
-                val hebBase = mapBaseToHebrew(base)
                 val cleanBase = hebBase?.takeIf { it.isNotBlank() }
                 return cleanBase?.let { "$it $suffix" } ?: suffix
             }
@@ -294,6 +297,10 @@ internal class SefariaAltTocBuilder(
                 val addrValue = computeAddressValue(node, 0)
                 val base = mapBaseToHebrew(node.childLabel)
                     ?: if (addressType.equals("Talmud", ignoreCase = true)) "דף" else null
+                if (base == ALIYAH_SECTION_LABEL) {
+                    val aliyahIndex = addrValue ?: position?.plus(1) ?: 1
+                    aliyahOrdinalLabel(aliyahIndex)?.let { return it }
+                }
                 val suffix = when {
                     addrValue != null && addressType.equals("Talmud", ignoreCase = true) -> toDaf(addrValue)
                     addrValue != null -> toGematria(addrValue)

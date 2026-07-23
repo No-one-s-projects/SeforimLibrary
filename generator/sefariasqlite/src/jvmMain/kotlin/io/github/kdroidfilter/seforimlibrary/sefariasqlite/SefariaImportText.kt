@@ -47,6 +47,20 @@ internal fun cleanSefariaLine(raw: String): String {
     return s
 }
 
+// Hebrew label Sefaria's aliyah section name maps to. Named so the alt-TOC
+// builder can recognise an aliyah level and re-label it by ordinal.
+internal const val ALIYAH_SECTION_LABEL = "עליה"
+
+// The seven weekly aliyot are read by their ordinal position (ראשון, שני, …),
+// which is how a חומש names them, rather than "עליה" + gematria. Returns the
+// ordinal label for a 1-based aliyah index, or null outside the customary range
+// so the caller falls back to its generic "<base> <gematria>" label.
+private val ALIYAH_ORDINALS = listOf(
+    "ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שביעי"
+)
+
+internal fun aliyahOrdinalLabel(index: Int): String? = ALIYAH_ORDINALS.getOrNull(index - 1)
+
 /**
  * Maps common Sefaria English section/address names to their Hebrew equivalents.
  * Used when a schema only exposes `sectionNames` (English) without the
@@ -59,7 +73,7 @@ internal fun mapSectionNameToHebrew(base: String?): String? {
     if (base.isNullOrBlank()) return null
     val norm = base.lowercase()
     return when {
-        "aliyah" in norm || "aliya" in norm -> "עליה"
+        "aliyah" in norm || "aliya" in norm -> ALIYAH_SECTION_LABEL
         "daf" in norm -> "דף"
         "chapter" in norm -> "פרק"
         "perek" in norm -> "פרק"

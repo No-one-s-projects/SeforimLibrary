@@ -240,6 +240,126 @@ class SefariaAltTocBuilderTest {
     }
 
     /**
+     * A חומש's Parasha alt-structure enumerates the seven weekly aliyot. Sefaria
+     * labels the section "Aliyah", which the builder used to render as
+     * "עליה" + gematria ("עליה א"…"עליה ז"). Readers name the aliyot by their
+     * ordinal reading position, so the builder now emits ראשון…שביעי.
+     */
+    @Test
+    fun parashaAliyotAreLabelledByOrdinal() = runBlocking {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        val repository = SeforimRepository(":memory:", driver)
+
+        val categoryId = repository.insertCategory(
+            Category(id = 0, parentId = null, title = "תורה", level = 0, order = 0)
+        )
+        val sourceId = repository.insertSource("Sefaria")
+        val bookId = repository.insertBook(
+            Book(
+                id = 0,
+                categoryId = categoryId,
+                sourceId = sourceId,
+                title = "בראשית",
+                heShortDesc = null,
+                notesContent = null,
+                order = 0f,
+                totalLines = 10,
+                isBaseBook = true,
+                hasAltStructures = true
+            )
+        )
+
+        val bookPath = "בראשית"
+        val lineKeyToId = mutableMapOf<Pair<String, Int>, Long>()
+        for (i in 0 until 10) {
+            val lineId = repository.insertLine(
+                Line(id = 0, bookId = bookId, lineIndex = i, content = "line $i", heRef = null)
+            )
+            lineKeyToId[bookPath to i] = lineId
+        }
+
+        // Parasha wholeRef at line 0, seven aliyah refs at lines 1..7.
+        val refEntries = buildList {
+            add(RefEntry(ref = "Genesis 1", heRef = "בראשית א", path = bookPath, lineIndex = 1))
+            for (n in 1..7) {
+                add(
+                    RefEntry(
+                        ref = "Genesis 1:$n",
+                        heRef = "בראשית א:$n",
+                        path = bookPath,
+                        lineIndex = n + 1 // 1-based; 0-based line = n
+                    )
+                )
+            }
+        }
+
+        val altStructures = listOf(
+            AltStructurePayload(
+                key = "Parasha",
+                title = "Genesis",
+                heTitle = "בראשית",
+                nodes = listOf(
+                    AltNodePayload(
+                        title = "Bereshit",
+                        heTitle = "בראשית",
+                        wholeRef = "Genesis 1",
+                        refs = (1..7).map { "Genesis 1:$it" },
+                        addressTypes = listOf("Aliyah"),
+                        childLabel = "Aliyah",
+                        addresses = emptyList(),
+                        skippedAddresses = emptyList(),
+                        startingAddress = null,
+                        offset = null,
+                        children = emptyList()
+                    )
+                )
+            )
+        )
+
+        val payload = BookPayload(
+            heTitle = "בראשית",
+            enTitle = "Genesis",
+            categoriesHe = listOf("תורה"),
+            lines = (0 until 10).map { "line $it" },
+            refEntries = refEntries,
+            headings = emptyList(),
+            authors = emptyList(),
+            description = null,
+            heShortDesc = null,
+            pubDates = emptyList(),
+            altStructures = altStructures
+        )
+
+        val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repository)
+        val builder = SefariaAltTocBuilder(repository, bindings)
+        val result = builder.buildAltTocStructuresForBook(
+            payload = payload,
+            bookId = bookId,
+            bookPath = bookPath,
+            lineKeyToId = lineKeyToId,
+            totalLines = 10
+        )
+        assertTrue(result, "Alt structure should have been generated")
+
+        val structureId = repository.getAltTocStructuresForBook(bookId).first().id
+        val aliyot = repository.getAltTocEntriesForStructure(structureId)
+            .filter { it.level == 1 }
+            .sortedBy { it.lineId }
+
+        assertEquals(
+            listOf("ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שביעי"),
+            aliyot.map { it.text },
+            "Aliyot should be labelled by ordinal, not 'עליה' + gematria"
+        )
+        assertTrue(
+            aliyot.none { it.text.startsWith("עליה") },
+            "No aliyah entry should carry the old 'עליה' label"
+        )
+
+        driver.close()
+    }
+
+    /**
      * Mesillat Yesharim: the "Topic" alt-struct wholeRefs use the title variant
      * "Messilat Yesharim" (double-s, listed in titleVariants) instead of the
      * primary "Mesillat Yesharim". An unrecognized title made resolution fall
