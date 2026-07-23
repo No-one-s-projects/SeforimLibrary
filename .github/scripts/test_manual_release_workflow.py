@@ -45,6 +45,42 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn(': "${RELINK_TITLE:=}"', cleanup)
         self.assertIn(': "${KAGGLE_TITLE:=}"', cleanup)
 
+    def test_split_kaggle_child_releases_and_reacquires_host_lease(self):
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        release = (
+            'python3 .pipeline-control/.github/scripts/host_lease.py release '
+            '--state "$HOST_LEASE_STATE"'
+        )
+        reacquire = (
+            "python3 .pipeline-control/.github/scripts/host_lease.py start \\\n"
+            "            --lock /run/lock/otzaria/host-heavy.lock"
+        )
+        dispatch_case = 'case "$SERIAL_LINKER_TARGET" in\n            kaggle)'
+        terminal = "completed:success) break"
+
+        self.assertEqual(relink.count(release), 1)
+        self.assertEqual(relink.count(reacquire), 1)
+        self.assertLess(relink.index(release), relink.index(dispatch_case))
+        self.assertLess(relink.index(terminal), relink.index(reacquire))
+        self.assertNotIn(
+            'if [ "$SERIAL_LINKER_TARGET" = server ]; then',
+            relink,
+            "the split Kaggle child also needs the Oracle host lease",
+        )
+
+    def test_parent_timeout_covers_db_build_and_complete_split_child(self):
+        self.assertIn(
+            "    timeout-minutes: 1440\n",
+            self.workflow,
+            "the self-hosted parent must outlive DB generation plus the legal split child chain",
+        )
+        self.assertIn("90m GPU NER + 480m CPU resolution", self.workflow)
+        self.assertEqual(
+            self.workflow.count('--ttl 90000'),
+            2,
+            "both lease lives must exceed the 24-hour parent ceiling",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

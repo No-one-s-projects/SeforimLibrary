@@ -118,7 +118,7 @@ def start(args) -> int:
         "--owner-pid", str(owner_pid), "--owner-start-ticks", str(owner_start),
     ]
     # Truly detach across GitHub steps: inheriting the step's stdout/stderr pipes
-    # can keep the run command open until the 12-hour holder exits even though
+    # can keep the run command open until the 25-hour holder exits even though
     # this launcher returned.  State-file readiness is the only IPC we need.
     proc = subprocess.Popen(
         command,
@@ -222,7 +222,7 @@ def main() -> int:
         p = sub.add_parser(name)
         p.add_argument("--lock", required=True)
         p.add_argument("--state", required=True)
-        p.add_argument("--ttl", type=int, default=43800)
+        p.add_argument("--ttl", type=int, default=90000)
         if name == "hold":
             p.add_argument("--owner-pid", type=int, required=True)
             p.add_argument("--owner-start-ticks", type=int, required=True)
