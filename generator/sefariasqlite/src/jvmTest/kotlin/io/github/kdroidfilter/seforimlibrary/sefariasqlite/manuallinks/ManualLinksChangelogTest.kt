@@ -8,6 +8,51 @@ import kotlin.test.assertNull
 
 class ManualLinksChangelogTest {
     @Test
+    fun readsAuthoritativeRootMetadataWithFlatOrdinalTransportMirror() {
+        val root = Files.createTempDirectory("manual-links-transport")
+        val dir = Files.createDirectories(root.resolve("changelogs"))
+        val changelog = dir.resolve("0001-r2-changelog_diff.json")
+        Files.writeString(
+            changelog,
+            """{"old_tag":"r1","new_tag":"r2","books":{"en_renamed":[],"he_renamed":[]}}""",
+        )
+        val metadataJson = metadataJson(
+            tag = "r2",
+            previousTag = "r1",
+            previousDigest = "a".repeat(64),
+            changelogSize = Files.size(changelog),
+            changelogSha = ManualLinksJson.rawSha256(changelog),
+        )
+        val metadata = root.resolve("release_metadata.json")
+        Files.writeString(metadata, metadataJson)
+        Files.writeString(dir.resolve("0001-r2-release_metadata.json"), metadataJson)
+        val base = ManualLinksLineage(
+            sefariaTag = "r1",
+            releaseMetadataSha256 = "a".repeat(64),
+            runId = 1,
+            runAttempt = 1,
+            archiveSha256 = "1".repeat(64),
+            archiveSize = 0,
+            archiveParts = listOf(AssetDescriptor("part", 0, "2".repeat(64))),
+            appliedChangelogChain = emptyList(),
+            seforimToolCommit = "b".repeat(40),
+            sourceLinksTreeSha256 = "3".repeat(64),
+            packagedLinksTreeSha256 = "4".repeat(64),
+            configSha256 = "5".repeat(64),
+        )
+
+        val chain = ManualLinksChangelog.verifiedChain(
+            targetMetadataPath = metadata,
+            targetMetadataSha256 = ManualLinksJson.rawSha256(metadata),
+            target = ReleaseMetadata.read(metadata),
+            base = base,
+            changelogDir = dir,
+        )
+
+        assertEquals(1, chain.size)
+    }
+
+    @Test
     fun readsBaselineMetadataEmittedByReleaseContract() {
         val metadata = Files.createTempFile("baseline-release-metadata", ".json")
         Files.writeString(metadata, metadataJson(tag = "r1", previousTag = null, changelogOldTag = ""))

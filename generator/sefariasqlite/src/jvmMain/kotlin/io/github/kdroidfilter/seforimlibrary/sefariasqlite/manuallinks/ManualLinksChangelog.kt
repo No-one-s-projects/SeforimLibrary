@@ -109,14 +109,18 @@ internal object ManualLinksChangelog {
         changelogDir?.resolve(tag)?.resolve(asset.name)?.let(candidates::add)
         if (changelogDir != null && Files.isDirectory(changelogDir)) {
             Files.walk(changelogDir).use { stream ->
-                stream.filter { Files.isRegularFile(it) && (it.name == asset.name || it.name.endsWith("-$asset.name")) }
+                stream.filter { Files.isRegularFile(it) && (it.name == asset.name || it.name.endsWith("-${asset.name}")) }
                     .forEach(candidates::add)
             }
         }
-        val matching = candidates.filter {
-            Files.isRegularFile(it) && Files.size(it) == asset.size && ManualLinksJson.rawSha256(it) == asset.sha256
-        }.distinct()
-        require(matching.size == 1) { "Expected exactly one verified ${asset.name} for $tag; found ${matching.size}" }
+        val inspected = candidates.filter(Files::isRegularFile).associateWith { path ->
+            Files.size(path) to ManualLinksJson.rawSha256(path)
+        }
+        val matching = inspected.filterValues { (size, digest) -> size == asset.size && digest == asset.sha256 }.keys.distinct()
+        require(matching.size == 1) {
+            "Expected exactly one verified ${asset.name} for $tag; found ${matching.size}; " +
+                "regular candidates=${inspected.map { (path, identity) -> "${path.fileName}:${identity.first}:${identity.second}" }}"
+        }
         return matching.single()
     }
 

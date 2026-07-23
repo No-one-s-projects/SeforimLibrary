@@ -13,7 +13,13 @@ permissions:
 jobs:
   update-manifest:
     name: Generate release assets JSON
+    # Publishing an internal handoff pre-release must not start a manifest job.
+    if: ${{ github.event_name != 'release' || github.event.release.prerelease == false }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: seforim-release-manifest-writer
+      cancel-in-progress: false
+      queue: max
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -40,8 +46,13 @@ jobs:
             LATEST_ARG=(--argjson latest null)
           fi
 
-          # All releases for history ([] when none exist).
-          ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 1000)
+          # Every final published DB release for history ([] when none exist),
+          # fully paginated so a long-lived repository never truncates its
+          # manifest. Workflow handoffs are pre-releases and stay out of the
+          # user-facing database history.
+          ALL_RELEASES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select((.draft|not) and (.prerelease|not)) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
+            | jq -sc '.')
 
           GENERATED_AT=$(jq -r '[.[].publishedAt | select(. != null)] | max // "1970-01-01T00:00:00Z"' <<<"$ALL_RELEASES")
 
@@ -66,5 +77,6 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Update release manifest [skip ci]"
-            git push
+            git pull --rebase origin otzaria
+            git push origin HEAD:otzaria
           fi
