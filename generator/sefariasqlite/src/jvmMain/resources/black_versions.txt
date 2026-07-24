@@ -114,3 +114,10 @@ Yehoyesh's Yiddish Tanakh Translation [yi]
 
 # --- פרגמנט ויקיפדיה כפול (לתקוני הזהר יש נוסחים מלאים; זה 9 קטעים בלבד) ---
 תקוני הזהר | Hebrew Wikipedia
+
+# --- תלמוד בבלי: מהדורת ויליאם דוידסון (37 מסכתות כל אחת) ---
+William Davidson Edition - Aramaic
+William Davidson Edition - Vocalized Aramaic
+
+# --- תלמוד ירושלמי שקלים: מהדורת ויליאם דוידסון ---
+תלמוד ירושלמי שקלים | William Davidson Edition - Hebrew
