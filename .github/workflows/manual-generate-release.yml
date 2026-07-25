@@ -1,4 +1,4 @@
-name: Manual Generate + Pre-Release
+name: Weekly 5–6/6 · Build, link, validate and publish Seforim DB
 run-name: manual-generate-release correlation=${{ inputs.correlation_id }}
 
 # End-to-end build pipeline: builds seforim.db from immutable, digest-pinned
