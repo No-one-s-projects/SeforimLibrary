@@ -83,6 +83,30 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA synchronous = OFF")
         repository.executeRawQuery("PRAGMA journal_mode = OFF")
 
+        // LINKER is a generated, type-owned projection. Replace it atomically by
+        // type rather than only upserting current records: otherwise links that the
+        // engine intentionally stopped emitting (notably old heading links) survive
+        // forever. Child rows are deleted explicitly because bulk mode disables
+        // foreign-key cascades for throughput.
+        var replacedLinks = 0L
+        driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM link WHERE connectionTypeId = ?",
+            { c ->
+                if (c.next().value) replacedLinks = c.getLong(0) ?: 0L
+                QueryResult.Value(Unit)
+            },
+            1,
+        ) { bindLong(0, ctLinker) }
+        if (replacedLinks > 0) {
+            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $ctLinker"
+            repository.executeRawQuery("DELETE FROM link_anchor WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $ctLinker")
+            logger.i { "Removed $replacedLinks existing LINKER links before deterministic rebuild" }
+        }
+
         // ── sidecar → refsByCanonical / refsByBase + (path,lineIndex)→lineId ──
         logger.i { "Loading sidecar…" }
         val allRefs = ArrayList<RefEntry>()
@@ -177,6 +201,7 @@ fun main(args: Array<String>) = runBlocking {
         // it for the ~0.07% of ranges affected.
         val rangeEndByLink = HashMap<Long, Pair<Long, Int>>()
         var links = 0; var anchors = 0; var unresolvedTarget = 0; var unmappedSource = 0; var staleSource = 0
+        var headingSource = 0
         var missingSourceHash = 0
 
         suspend fun flush() {
@@ -211,6 +236,10 @@ fun main(args: Array<String>) = runBlocking {
                     // A record with NO hash bypasses the guard — already counted at decode,
                     // fatal under -PlinkerStrict (every engine-produced record carries one).
                     val content = contentFor(srcLineId)
+                    // Defense in depth for old/external artifacts. The engine no
+                    // longer emits headings, but the DB invariant belongs here too:
+                    // structural location labels are never clickable source text.
+                    if (isHeadingContent(content)) { headingSource++; continue }
                     if (rec.source_hash != null && hashFor(srcLineId) != rec.source_hash) { staleSource++; continue }
 
                     // One link per (src,tgt); reuse its id for repeated citations of the same ref.
@@ -261,7 +290,11 @@ fun main(args: Array<String>) = runBlocking {
             }
             ranges.chunked(5000).forEach { repository.insertLinkRangesBatch(it) }
         }
-        logger.i { "LINKER: $links links, $anchors anchors, ${rangeEndByLink.size} target ranges (unresolved target: $unresolvedTarget, unmapped source: $unmappedSource, stale source: $staleSource)" }
+        logger.i {
+            "LINKER: $links links, $anchors anchors, ${rangeEndByLink.size} target ranges " +
+                "(heading source: $headingSource, unresolved target: $unresolvedTarget, " +
+                "unmapped source: $unmappedSource, stale source: $staleSource)"
+        }
 
         // Serial-pipeline invariant (-PlinkerStrict): the linker just ran on THIS build's
         // snapshot, so every record's source line must exist, carry a hash, and match it.
@@ -274,11 +307,11 @@ fun main(args: Array<String>) = runBlocking {
             }
         }
 
-        // LINKER links were inserted AFTER the Sefaria import's book_has_links pass, so refresh the
-        // source/target flags — additively (never reset to 0) — or a book that gained ONLY linker
-        // links would still read hasSourceLinks=0 and the app would treat it as link-less.
+        // LINKER is type-replaced above, so refresh the materialized flags exactly:
+        // a book whose only links were removed headings must be allowed to return to 0.
         repository.executeRawQuery(
             "INSERT OR IGNORE INTO book_has_links(bookId, hasSourceLinks, hasTargetLinks) SELECT id, 0, 0 FROM book")
+        repository.executeRawQuery("UPDATE book_has_links SET hasSourceLinks=0, hasTargetLinks=0")
         repository.executeRawQuery(
             "UPDATE book_has_links SET hasSourceLinks=1 WHERE bookId IN (SELECT DISTINCT sourceBookId FROM link)")
         repository.executeRawQuery(
@@ -306,6 +339,14 @@ internal fun linkerContentHash(content: String): String {
     for (b in digest) { val v = b.toInt() and 0xff; sb.append("0123456789abcdef"[v ushr 4]); sb.append("0123456789abcdef"[v and 0xf]) }
     return sb.substring(0, 16)
 }
+
+private val headingContentRegex = Regex(
+    pattern = "^[\\s\\uFEFF]*<h[1-6](?:\\s|>)",
+    option = RegexOption.IGNORE_CASE,
+)
+
+internal fun isHeadingContent(content: String): Boolean =
+    headingContentRegex.containsMatchIn(content)
 
 @Serializable
 private data class ArtifactBookKey(val source_name: String, val canonical_he_title: String)

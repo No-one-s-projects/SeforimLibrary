@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -138,5 +139,14 @@ class GenerateLinkerLinksTest {
         assertEquals("aaf4c61ddcc5e8a2", linkerContentHash("hello"))
         assertEquals("643cbc0fbf2800d7", linkerContentHash("שלום עולם"))
         assertEquals("da39a3ee5e6b4b0d", linkerContentHash(""))
+    }
+
+    @Test
+    fun structuralHeadingsAreNeverLinkableSourceText() {
+        assertTrue(isHeadingContent("<h1>שולחן ערוך, אורח חיים</h1>"))
+        assertTrue(isHeadingContent("\uFEFF  <H6 class=\"minor\">סעיף א</H6>"))
+        assertFalse(isHeadingContent("<h10>not a supported heading</h10>"))
+        assertFalse(isHeadingContent("ראו <h2>כאן</h2> בתוך משפט"))
+        assertFalse(isHeadingContent("<b>סימן א</b>"))
     }
 }

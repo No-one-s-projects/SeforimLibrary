@@ -63,7 +63,7 @@ tasks.register<JavaExec>("writeReleaseInfo") {
 //   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db -PlinesSnapshotBookLimit=50
 tasks.register<JavaExec>("dumpLines") {
     group = "application"
-    description = "Dump seforim.db lines into lines_snapshot.db (book_key + line_index + content) for the linker."
+    description = "Dump seforim.db lines into lines_snapshot.db (book key + line + resolver context) for the linker."
 
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.DumpLinesKt")
