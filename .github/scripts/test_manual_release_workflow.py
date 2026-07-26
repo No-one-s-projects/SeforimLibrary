@@ -81,6 +81,13 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "both lease lives must exceed the 24-hour parent ceiling",
         )
 
+    def test_weekly_database_releases_default_to_final(self):
+        prerelease_input = self.workflow.split("      prerelease:\n", 1)[1].split(
+            "      source_commit:\n", 1
+        )[0]
+        self.assertIn("default: false", prerelease_input)
+        self.assertIn("Weekly database builds are final releases", prerelease_input)
+
 
 if __name__ == "__main__":
     unittest.main()
