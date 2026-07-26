@@ -4,17 +4,17 @@ run-name: manual-generate-release correlation=${{ inputs.correlation_id }}
 # End-to-end build pipeline: builds seforim.db from immutable, digest-pinned
 # Sefaria + Otzaria releases, runs the LinkerToOtzaria relink against this
 # build's own lines snapshot and injects the resulting LINKER links, then
-# packages a split bundle and publishes the lot as a GitHub pre-release.
+# packages a split bundle and publishes the lot as a final GitHub release.
 # Serial by design: the release always ships a complete link set; a linker
 # failure fails the build loudly (requires the PIPELINE_TOKEN secret).
 #
 # From the second release onwards, the workflow produces a logarithmic
-# fan of delta patches against previous pre-releases at fixed offsets
+# fan of delta patches against previous releases at fixed offsets
 # {1, 2, 4, 8, 16}. A client on any version k within those offsets can
 # fetch a *direct* patch; clients further back chain through the
 # available anchors. The full bundle remains the fallback.
 #
-# Anchors auto-discovered from prior pre-release assets — no manual
+# Anchors auto-discovered from prior release assets — no manual
 # operator input needed. db_version is derived as max(prior versions)+1.
 
 on:
@@ -30,13 +30,12 @@ on:
           - 'server-2'
       prerelease:
         description: |
-          Publish as a GitHub pre-release (true, default) or a final
-          release (false). Pre-releases stay out of clients that watch
-          /releases/latest; flip to false when the pipeline is stable
-          enough for end users.
+          Publish as a GitHub pre-release (true) or a final release
+          (false, default). Weekly database builds are final releases;
+          use true only for an explicitly experimental manual build.
         type: boolean
         required: false
-        default: true
+        default: false
       source_commit:
         description: 'Full SeforimLibrary commit selected by the manual-links sync'
         type: string
@@ -271,7 +270,7 @@ jobs:
           fi
 
   build-and-release:
-    name: Build seforim.db + bundle + delta fan, publish pre-release
+    name: Build seforim.db + bundle + delta fan, publish release
     needs: reconcile
     if: needs.reconcile.outputs.reuse != 'true'
     runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
