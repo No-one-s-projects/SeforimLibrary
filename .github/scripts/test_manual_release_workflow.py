@@ -88,6 +88,18 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("default: false", prerelease_input)
         self.assertIn("Weekly database builds are final releases", prerelease_input)
 
+    def test_reuse_skips_invalid_legacy_provenance_but_not_the_requested_source(self):
+        lookup = self.step("Find and verify exact provenance")
+        validation = 'if ! python3 .github/scripts/validate_build_provenance.py "$file"; then'
+        requested_source_guard = 'if [ "$target" = "$SOURCE_COMMIT" ]; then'
+        legacy_skip = '::warning::Skipping legacy release $tag with invalid build provenance'
+
+        self.assertIn(validation, lookup)
+        self.assertIn(requested_source_guard, lookup)
+        self.assertIn(legacy_skip, lookup)
+        self.assertLess(lookup.index(validation), lookup.index(requested_source_guard))
+        self.assertLess(lookup.index(requested_source_guard), lookup.index(legacy_skip))
+
 
 if __name__ == "__main__":
     unittest.main()

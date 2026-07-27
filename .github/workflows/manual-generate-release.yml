@@ -208,7 +208,19 @@ jobs:
             [ "$provenance_id" != "NONE" ] || continue
             file="$RUNNER_TEMP/provenance-scan/$release_id.json"
             gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$provenance_id" > "$file"
-            python3 .github/scripts/validate_build_provenance.py "$file"
+            # Releases created before the current provenance contract can carry a
+            # legacy build_provenance.json.  They cannot prove reuse for these
+            # pinned inputs, so ignore them; a malformed provenance for this
+            # exact source commit remains a hard failure rather than risking a
+            # duplicate or partial release.
+            if ! python3 .github/scripts/validate_build_provenance.py "$file"; then
+              if [ "$target" = "$SOURCE_COMMIT" ]; then
+                echo "::error::Release $tag targets this source commit but has invalid build provenance; recover or remove it explicitly."
+                exit 1
+              fi
+              echo "::warning::Skipping legacy release $tag with invalid build provenance"
+              continue
+            fi
             if jq -e \
               --arg source "$SOURCE_COMMIT" \
               --arg st "$SEFARIA_TAG" --arg sm "$SEFARIA_METADATA_SHA" --arg sa "$SEFARIA_ARCHIVE_SHA" \
