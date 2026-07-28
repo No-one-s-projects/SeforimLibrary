@@ -1,117 +1,75 @@
 {
-  "generatedAt": "2026-07-23T10:28:45Z",
+  "generatedAt": "2026-07-27T21:54:43Z",
   "latest": {
     "assets": [
       {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487058952",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/491915792",
         "contentType": "application/json",
-        "createdAt": "2026-07-23T10:25:26Z",
-        "digest": "sha256:e76164fb57bb2519b3c3d6fe111a731d805681c0893139a976d55906be6ab8d2",
-        "id": "RA_kwDOQ6kTXM4dB-4I",
+        "createdAt": "2026-07-27T20:53:33Z",
+        "digest": "sha256:520f013052a2bc7f52d462fa4ea68f952aa37767da2be5c4b1e3e4043b98491a",
+        "id": "RA_kwDOQ6kTXM4dUgoQ",
         "label": "",
         "name": "build_provenance.json",
-        "size": 2807,
+        "size": 1524,
         "state": "uploaded",
-        "updatedAt": "2026-07-23T10:25:27Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/build_provenance.json"
+        "updatedAt": "2026-07-27T20:53:33Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v18-20260727202417/build_provenance.json"
       },
       {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487058994",
-        "contentType": "application/zstd",
-        "createdAt": "2026-07-23T10:25:29Z",
-        "digest": "sha256:e879511f9c10ab90f1effa15ca0516801f30f34296559eb545440e84de5a789a",
-        "id": "RA_kwDOQ6kTXM4dB-4y",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/491941986",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-07-27T21:24:06Z",
+        "digest": "sha256:6d007451f7e3d0064fd7b8e71cddc1dc41ae425f718af8e89cacd7a5f789b08b",
+        "id": "RA_kwDOQ6kTXM4dUnBi",
         "label": "",
         "name": "lines_snapshot.db.zst",
-        "size": 1024010422,
+        "size": 1044823225,
         "state": "uploaded",
-        "updatedAt": "2026-07-23T10:26:21Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/lines_snapshot.db.zst"
+        "updatedAt": "2026-07-27T21:38:50Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v18-20260727202417/lines_snapshot.db.zst"
       },
       {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487059960",
-        "contentType": "application/zstd",
-        "createdAt": "2026-07-23T10:26:23Z",
-        "digest": "sha256:dee78d6cdd2966d62ffd1e23e63a6b19b19bfd8ff3df5d15447a6257723ece4b",
-        "id": "RA_kwDOQ6kTXM4dB_H4",
-        "label": "",
-        "name": "patch-v14-v16.db.zst",
-        "size": 15231636,
-        "state": "uploaded",
-        "updatedAt": "2026-07-23T10:26:24Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/patch-v14-v16.db.zst"
-      },
-      {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487060027",
-        "contentType": "application/json",
-        "createdAt": "2026-07-23T10:26:26Z",
-        "digest": "sha256:f661c5ac60d890b79f385986e94e18b4e8032d8b9190c739ecf415ca5ce0b1ed",
-        "id": "RA_kwDOQ6kTXM4dB_I7",
-        "label": "",
-        "name": "patch-v14-v16.db.zst.manifest.json",
-        "size": 610,
-        "state": "uploaded",
-        "updatedAt": "2026-07-23T10:26:26Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/patch-v14-v16.db.zst.manifest.json"
-      },
-      {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487060068",
-        "contentType": "application/zstd",
-        "createdAt": "2026-07-23T10:26:28Z",
-        "digest": "sha256:d7c108da72c8522eec1db36e8446ff13861100aa195e1c706277e616eba55a31",
-        "id": "RA_kwDOQ6kTXM4dB_Jk",
-        "label": "",
-        "name": "patch-v15-v16.db.zst",
-        "size": 14605740,
-        "state": "uploaded",
-        "updatedAt": "2026-07-23T10:26:30Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/patch-v15-v16.db.zst"
-      },
-      {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487060145",
-        "contentType": "application/json",
-        "createdAt": "2026-07-23T10:26:32Z",
-        "digest": "sha256:cbb31a788d41140b51677f9478a9aed981aee110ad087dd701fdd9303fb805f4",
-        "id": "RA_kwDOQ6kTXM4dB_Kx",
-        "label": "",
-        "name": "patch-v15-v16.db.zst.manifest.json",
-        "size": 610,
-        "state": "uploaded",
-        "updatedAt": "2026-07-23T10:26:32Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/patch-v15-v16.db.zst.manifest.json"
-      },
-      {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487060179",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/491919187",
         "contentType": "application/octet-stream",
-        "createdAt": "2026-07-23T10:26:34Z",
-        "digest": "sha256:dbeb53d5cd2bcc95f90c7f49607ddd9dfff4c001a457823814438950478d4243",
-        "id": "RA_kwDOQ6kTXM4dB_LT",
+        "createdAt": "2026-07-27T20:58:17Z",
+        "digest": "sha256:db46919704ba325f125c0b706ebaf72ef1249546616e3ead8274034a140e9059",
+        "id": "RA_kwDOQ6kTXM4dUhdT",
         "label": "",
         "name": "seforim.db.buildstate",
-        "size": 999325696,
+        "size": 948445184,
         "state": "uploaded",
-        "updatedAt": "2026-07-23T10:27:26Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/seforim.db.buildstate"
+        "updatedAt": "2026-07-27T21:20:50Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v18-20260727202417/seforim.db.buildstate"
       },
       {
-        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/487061199",
-        "contentType": "application/zstd",
-        "createdAt": "2026-07-23T10:27:29Z",
-        "digest": "sha256:65765553f3e5366e36406845dab103d27eb0ffcd63bbb615c9a3a5e3cd58ebc7",
-        "id": "RA_kwDOQ6kTXM4dB_bP",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/491915784",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-07-27T20:53:32Z",
+        "digest": "sha256:73802dffb695f58bf8bcea41e6253a65b02627ba745603d2241677b8f1bc964b",
+        "id": "RA_kwDOQ6kTXM4dUgoI",
         "label": "",
         "name": "seforim.db.zst",
-        "size": 1551322769,
+        "size": 1523587340,
         "state": "uploaded",
-        "updatedAt": "2026-07-23T10:28:40Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v16-20260723080937/seforim.db.zst"
+        "updatedAt": "2026-07-27T21:27:51Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v18-20260727202417/seforim.db.zst"
       }
     ],
-    "name": "v16-20260723080937",
-    "publishedAt": "2026-07-23T10:28:45Z",
-    "tagName": "v16-20260723080937"
+    "name": "v18-20260727202417",
+    "publishedAt": "2026-07-27T21:54:43Z",
+    "tagName": "v18-20260727202417"
   },
   "releases": [
+    {
+      "name": "v18-20260727202417",
+      "publishedAt": "2026-07-27T21:54:43Z",
+      "tagName": "v18-20260727202417"
+    },
+    {
+      "name": "v17-20260725215227",
+      "publishedAt": "2026-07-26T00:13:00Z",
+      "tagName": "v17-20260725215227"
+    },
     {
       "name": "v16-20260723080937",
       "publishedAt": "2026-07-23T10:28:45Z",
