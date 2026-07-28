@@ -670,11 +670,98 @@ jobs:
           set -euo pipefail
           SEED_TAG="${{ steps.discover.outputs.seed_tag }}"
           echo "Seeding allocator from release '$SEED_TAG'"
-          mkdir -p build prev-dbs
-          gh release download "$SEED_TAG" \
-            --pattern 'seforim.db.buildstate' \
-            --dir build
-          # Buildstate goes where generateSeforimDb expects it.
+          if [[ ! "$SEED_TAG" =~ ^v([1-9][0-9]*)-[0-9]{14}$ ]]; then
+            echo "::error::Invalid allocator seed tag: $SEED_TAG"
+            exit 1
+          fi
+          SEED_VERSION="${BASH_REMATCH[1]}"
+          mkdir -p build prev-dbs seed-contract
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$SEED_TAG" > seed-contract/release.json
+          jq -e --arg tag "$SEED_TAG" \
+            '.draft == false and .tag_name == $tag' \
+            seed-contract/release.json >/dev/null
+
+          # Weekly saga provenance (v1/v2) and the one-time local full-corpus
+          # provenance (v3) are different contracts.  The latter may seed
+          # allocator IDs, but must never be accepted as proof that a weekly
+          # saga can be reused.
+          CANONICAL_COUNT="$(jq '[.assets[] | select(.name == "build_provenance.json")] | length' seed-contract/release.json)"
+          LOCAL_COUNT="$(jq '[.assets[] | select(.name == "local_build_provenance.schema3.json")] | length' seed-contract/release.json)"
+          if [ "$CANONICAL_COUNT" -eq 1 ] && [ "$LOCAL_COUNT" -eq 0 ]; then
+            PROVENANCE_NAME=build_provenance.json
+            PROVENANCE_VALIDATOR=canonical
+          elif [ "$CANONICAL_COUNT" -eq 0 ] && [ "$LOCAL_COUNT" -eq 1 ]; then
+            PROVENANCE_NAME=local_build_provenance.schema3.json
+            PROVENANCE_VALIDATOR=allocator-seed
+          else
+            echo "::error::Release $SEED_TAG must contain exactly one recognized provenance contract"
+            exit 1
+          fi
+          PROVENANCE_ID="$(jq -r --arg name "$PROVENANCE_NAME" \
+            '.assets[] | select(.name == $name) | .id' seed-contract/release.json)"
+          read -r provenance_size provenance_digest < <(
+            jq -r --arg name "$PROVENANCE_NAME" \
+              '.assets[] | select(.name == $name) | [(.size|tostring), .digest] | @tsv' \
+              seed-contract/release.json
+          )
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$PROVENANCE_ID" \
+            > "seed-contract/$PROVENANCE_NAME"
+          [ "$(stat -c %s "seed-contract/$PROVENANCE_NAME")" = "$provenance_size" ]
+          [[ "$provenance_digest" =~ ^sha256:([0-9a-f]{64})$ ]]
+          echo "${BASH_REMATCH[1]}  seed-contract/$PROVENANCE_NAME" | sha256sum -c -
+          if [ "$PROVENANCE_VALIDATOR" = canonical ]; then
+            python3 .github/scripts/validate_build_provenance.py \
+              "seed-contract/$PROVENANCE_NAME"
+          else
+            python3 .github/scripts/validate_allocator_seed_provenance.py \
+              "seed-contract/$PROVENANCE_NAME" \
+              --expected-tag "$SEED_TAG" \
+              --expected-version "$SEED_VERSION"
+          fi
+
+          # Bind every payload named by the provenance to the immutable GitHub
+          # release asset by both size and GitHub's server-computed SHA-256.
+          while IFS=$'\t' read -r name expected_size expected_sha; do
+            REMOTE_COUNT="$(jq --arg name "$name" \
+              '[.assets[] | select(.name == $name)] | length' seed-contract/release.json)"
+            [ "$REMOTE_COUNT" -eq 1 ] || {
+              echo "::error::Release $SEED_TAG has $REMOTE_COUNT assets named $name"
+              exit 1
+            }
+            read -r remote_size remote_digest < <(
+              jq -r --arg name "$name" \
+                '.assets[] | select(.name == $name) | [(.size|tostring), .digest] | @tsv' \
+                seed-contract/release.json
+            )
+            [ "$remote_size" = "$expected_size" ] || {
+              echo "::error::$name size differs from provenance"
+              exit 1
+            }
+            [ "$remote_digest" = "sha256:$expected_sha" ] || {
+              echo "::error::$name GitHub digest differs from provenance"
+              exit 1
+            }
+          done < <(
+            jq -r '.assets[] | [.name, (.size|tostring), .sha256] | @tsv' \
+              "seed-contract/$PROVENANCE_NAME"
+          )
+
+          BUILDSTATE_ID="$(jq -r \
+            '.assets[] | select(.name == "seforim.db.buildstate") | .id' \
+            seed-contract/release.json)"
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$BUILDSTATE_ID" \
+            > build/seforim.db.buildstate
+          EXPECTED_BUILDSTATE_SIZE="$(jq -r \
+            '.assets[] | select(.name == "seforim.db.buildstate") | .size' \
+            "seed-contract/$PROVENANCE_NAME")"
+          EXPECTED_BUILDSTATE_SHA="$(jq -r \
+            '.assets[] | select(.name == "seforim.db.buildstate") | .sha256' \
+            "seed-contract/$PROVENANCE_NAME")"
+          [ "$(stat -c %s build/seforim.db.buildstate)" = "$EXPECTED_BUILDSTATE_SIZE" ]
+          echo "$EXPECTED_BUILDSTATE_SHA  build/seforim.db.buildstate" | sha256sum -c -
+          # Buildstate now sits exactly where generateSeforimDb expects it.
           ls -lh build/seforim.db.buildstate
 
       # ─── Build seforim.db (full pipeline) ──────────────────────────────────

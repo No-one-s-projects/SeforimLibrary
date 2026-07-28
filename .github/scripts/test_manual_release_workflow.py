@@ -100,5 +100,28 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertLess(lookup.index(validation), lookup.index(requested_source_guard))
         self.assertLess(lookup.index(requested_source_guard), lookup.index(legacy_skip))
 
+    def test_allocator_seed_accepts_local_v3_without_weakening_saga_reuse(self):
+        seed = self.step("Seed allocator from offset-1 release")
+        reuse = self.step("Find and verify exact provenance")
+
+        self.assertIn("build_provenance.json", seed)
+        self.assertIn("local_build_provenance.schema3.json", seed)
+        self.assertIn("validate_build_provenance.py", seed)
+        self.assertIn("validate_allocator_seed_provenance.py", seed)
+        self.assertIn("--expected-tag \"$SEED_TAG\"", seed)
+        self.assertIn("--expected-version \"$SEED_VERSION\"", seed)
+        self.assertIn("must contain exactly one recognized provenance contract", seed)
+        self.assertNotIn("local_build_provenance.schema3.json", reuse)
+
+    def test_allocator_seed_verifies_remote_and_downloaded_buildstate(self):
+        seed = self.step("Seed allocator from offset-1 release")
+
+        self.assertIn(".draft == false and .tag_name == $tag", seed)
+        self.assertIn('[.assets[] | select(.name == $name)] | length', seed)
+        self.assertIn('"sha256:$expected_sha"', seed)
+        self.assertIn('stat -c %s "seed-contract/$PROVENANCE_NAME"', seed)
+        self.assertIn("stat -c %s build/seforim.db.buildstate", seed)
+        self.assertIn("sha256sum -c -", seed)
+
 if __name__ == "__main__":
     unittest.main()
