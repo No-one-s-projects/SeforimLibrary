@@ -204,8 +204,11 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("host_lease.py start"))
         assertTrue(workflow.contains("host_lease.py release"))
         assertFalse(workflow.contains("running under its lease"))
-        assertTrue(workflow.contains("timeout-minutes: 720"), "self-hosted parent must outlast its 8h relink child")
-        assertTrue(workflow.contains("--ttl 43800"), "cross-step lease must cover the 12h job")
+        assertTrue(
+            workflow.contains("timeout-minutes: 1440"),
+            "self-hosted parent must outlast DB generation and the complete split relink chain",
+        )
+        assertTrue(workflow.contains("--ttl 90000"), "cross-step lease must cover the 24h job")
     }
 
     @Test
