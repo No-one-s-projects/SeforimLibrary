@@ -93,19 +93,29 @@ class IdAllocatorBindings(
         heShortDesc: String? = null,
         heDesc: String? = null,
     ): Long {
-        val id = allocator.categoryId(canonicalPath)
+        var id = allocator.categoryId(canonicalPath)
         if (categoriesInserted.add(canonicalPath)) {
-            repo.insertCategoryWithId(
-                id,
-                parentId,
-                title,
-                level,
-                orderIndex,
-                heShortDesc,
-                heDesc,
-            )
+            repo.insertCategoryWithId(id, parentId, title, level, orderIndex, heShortDesc, heDesc)
+            // insertCategoryWithId is INSERT OR IGNORE. A row created outside the
+            // allocator (renameCategories auto-creates the leaf of a book_moves.csv
+            // destination with an implicit rowid) can already sit on this id — then
+            // our category is silently never written and every book we hand this id
+            // to lands inside that foreign folder. Verify, and take a fresh id if so.
+            var attempts = 0
+            while (!storedCategoryMatches(id, parentId, title)) {
+                check(++attempts <= MAX_CATEGORY_ID_ATTEMPTS) {
+                    "Cannot place category '$canonicalPath': id $id still collides after $attempts attempts"
+                }
+                id = allocator.reallocateCategoryId(canonicalPath)
+                repo.insertCategoryWithId(id, parentId, title, level, orderIndex, heShortDesc, heDesc)
+            }
         }
         return id
+    }
+
+    private suspend fun storedCategoryMatches(id: Long, parentId: Long?, title: String): Boolean {
+        val stored = repo.getCategory(id) ?: return false
+        return stored.title == title && stored.parentId == parentId
     }
 
     suspend fun upsertTocText(text: String): Long {
@@ -183,6 +193,14 @@ class IdAllocatorBindings(
     }
 
     companion object {
+        /**
+         * How many times [upsertCategory] may take a fresh id when the one it holds
+         * is occupied by a foreign row. One is normally enough (the Otzaria stage
+         * raises the allocator's floor past `MAX(category.id)` first); the extra
+         * headroom just keeps a forgotten floor from silently misplacing books.
+         */
+        private const val MAX_CATEGORY_ID_ATTEMPTS = 16
+
         /**
          * Builds the 20-byte content-hash slot of a line's natural key.
          *
