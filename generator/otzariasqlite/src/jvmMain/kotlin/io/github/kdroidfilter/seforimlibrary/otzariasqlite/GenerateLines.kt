@@ -6,6 +6,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.SEFORIM_DB_PAGE_SIZE_PRAGMA
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
@@ -136,6 +137,18 @@ fun main(args: Array<String>) = runBlocking {
     }
     val prev = buildStatePath.takeIf { Files.exists(it) }
     val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
+
+    // renameCategories runs BEFORE this stage and auto-creates the leaf of every
+    // book_moves.csv destination with an implicit rowid — i.e. at max(id)+1, right
+    // inside the range this allocator is about to hand out. insertCategoryWithId is
+    // INSERT OR IGNORE, so a collision silently drops our folder and dumps its books
+    // into that unrelated category. Raise the counter past whatever the DB holds.
+    run {
+        var maxCategoryId = 0L
+        driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM category",
+            { c -> if (c.next().value) maxCategoryId = c.getLong(0) ?: 0L; QueryResult.Value(Unit) }, 0)
+        allocator.ensureCounterAtLeast(IdTable.CATEGORY, maxCategoryId + 1)
+    }
 
     try {
         val buildVersion: Int = (System.getProperty("buildVersion")

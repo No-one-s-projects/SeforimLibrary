@@ -121,6 +121,13 @@ class InMemoryIdAllocator private constructor(
     override fun categoryId(canonicalPath: String): Long = allocateLookup(IdTable.CATEGORY, canonicalPath)
     override fun tocTextId(text: String): Long = allocateLookup(IdTable.TOC_TEXT, text)
 
+    override fun reallocateCategoryId(canonicalPath: String): Long {
+        val stale = lookupMaps.getValue(IdTable.CATEGORY).remove(canonicalPath)
+        val fresh = allocateLookup(IdTable.CATEGORY, canonicalPath)
+        logger.w { "Category id $stale for '$canonicalPath' is occupied by a foreign row; reallocated to $fresh" }
+        return fresh
+    }
+
     // bookId is itself build-stable, so the encoded string key is stable too.
     override fun bookVersionId(bookId: Long, versionTitle: String): Long =
         allocateLookup(IdTable.BOOK_VERSION, "$bookId $versionTitle")

@@ -32,6 +32,17 @@ interface IdAllocator {
     fun categoryId(canonicalPath: String): Long
     fun tocTextId(text: String): Long
 
+    /**
+     * Forgets the id cached for [canonicalPath] and hands out a fresh one.
+     *
+     * Only for the case where the reserved id turns out to be already occupied in
+     * the DB by a row this allocator never created — categories inserted with an
+     * implicit rowid outside the allocator, e.g. `renameCategories`' leaf
+     * auto-creation for book_moves.csv. The default implementation cannot
+     * reallocate and keeps the current id.
+     */
+    fun reallocateCategoryId(canonicalPath: String): Long = categoryId(canonicalPath)
+
     /** Stable id for a book edition; natural key = (bookId, versionTitle). */
     fun bookVersionId(bookId: Long, versionTitle: String): Long
 

@@ -43,6 +43,22 @@ class InMemoryIdAllocatorTest {
     }
 
     @Test
+    fun `reallocateCategoryId drops the squatted id and hands out a fresh one`() {
+        val allocator = InMemoryIdAllocator.load(path = null)
+        val path = "תלמוד בבלי/אחרונים/אור הישר/סדר נזיקין"
+        val stale = allocator.categoryId(path)
+
+        // renameCategories has since taken every rowid up to 1477 (including `stale`)
+        // with implicit-rowid inserts; the Otzaria stage raises the floor past the DB.
+        allocator.ensureCounterAtLeast(IdTable.CATEGORY, 1478L)
+        val fresh = allocator.reallocateCategoryId(path)
+
+        assertNotEquals(stale, fresh)
+        assertEquals(1478L, fresh)
+        assertEquals(fresh, allocator.categoryId(path)) // the new id sticks
+    }
+
+    @Test
     fun `same natural key returns same id across calls`() {
         val allocator = InMemoryIdAllocator.load(path = null)
         val first = allocator.bookId("Sefaria", "בראשית")
