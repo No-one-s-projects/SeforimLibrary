@@ -734,7 +734,7 @@ jobs:
         with:
           name: lines-snapshot-${{ github.run_attempt }}
           path: build/lines_snapshot.db.zst
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
       # Trigger the incremental relink on LinkerToOtzaria against THIS snapshot and wait.
