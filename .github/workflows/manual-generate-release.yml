@@ -723,19 +723,146 @@ jobs:
             -PlinesSnapshot="$RAW_SNAPSHOT" \
             --no-daemon --stacktrace
           zstd -T0 -19 -f -o build/lines_snapshot.db.zst "$RAW_SNAPSHOT"
-          # Pin the snapshot handoff: the relink verifies the artifact it downloads
+          # Pin the snapshot handoff: the relink verifies the release asset it downloads
           # against this digest, so it can only link the exact snapshot we produced.
           echo "SNAPSHOT_ZST_SHA256=$(sha256sum build/lines_snapshot.db.zst | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
-      # Hand the snapshot to the relink run as a workflow artifact of THIS run —
-      # deterministic (no "latest release" race) and works before any release exists.
-      - name: Upload snapshot artifact for the relink run
-        uses: actions/upload-artifact@v4
-        with:
-          name: lines-snapshot-${{ github.run_attempt }}
-          path: build/lines_snapshot.db.zst
-          retention-days: 1
-          if-no-files-found: error
+      # Publish the ~1 GB snapshot outside Actions artifact storage.  Its tag is
+      # content-addressed, so a repeated build either reuses byte-identical content or
+      # fails closed; the Linker never resolves a moving "Latest" pointer.  This early
+      # pre-release exists before the final DB release and remains available for an
+      # exactly correlated recovery after a parent failure.
+      - name: Publish immutable snapshot release for the relink run
+        env:
+          AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          snapshot=build/lines_snapshot.db.zst
+          tag="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"
+          expected_size=$(stat --format='%s' "$snapshot")
+          [ "$expected_size" -le 2147483647 ] || {
+            echo "::error::snapshot exceeds GitHub's 2 GiB release-asset limit"
+            exit 1
+          }
+          use_token() {
+            case "$1" in
+              automatic)
+                [ "$RELEASE_AUTOMATIC_WRITABLE" = true ] || return 1
+                export GH_TOKEN="$AUTOMATIC_TOKEN"
+                ;;
+              cross-repo)
+                [ "$RELEASE_CROSS_REPO_WRITABLE" = true ] || return 1
+                export GH_TOKEN="$CROSS_REPO_TOKEN"
+                ;;
+              *) return 1 ;;
+            esac
+            token_kind="$1"
+          }
+          switch_token() {
+            case "$token_kind" in
+              automatic) use_token cross-repo ;;
+              cross-repo) use_token automatic ;;
+              *) return 1 ;;
+            esac
+          }
+          use_token "$RELEASE_TOKEN_KIND" || {
+            echo "::error::release credential preflight result is missing or invalid"
+            exit 1
+          }
+          release_state() {
+            local out="$RUNNER_TEMP/snapshot-release.json" err="$RUNNER_TEMP/snapshot-release.err"
+            if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$out" 2> "$err"; then
+              if grep -q 'HTTP 404' "$err"; then echo absent; return 0; fi
+              cat "$err" >&2
+              return 1
+            fi
+            python3 - "$out" "$tag" "$SNAPSHOT_ZST_SHA256" "$expected_size" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1],encoding="utf-8"))
+          all_assets=value.get("assets",[])
+          matches=[a for a in all_assets if a.get("name")=="lines_snapshot.db.zst"]
+          identity=(value.get("tag_name")==sys.argv[2] and value.get("draft") is False and
+                    value.get("prerelease") is True)
+          if not identity or len(matches)>1 or len(all_assets)!=len(matches):
+              print("conflict")
+          elif not matches:
+              print("empty")
+          else:
+              asset=matches[0]
+              digest=asset.get("digest")
+              if asset.get("size") != int(sys.argv[4]): print("conflict")
+              elif digest in (None, ""): print("pending")
+              else: print("exact" if digest=="sha256:"+sys.argv[3] else "conflict")
+          PY
+          }
+          ensure_release() {
+            local state
+            state=$(release_state) || return 1
+            case "$state" in
+              exact|empty|pending) return 0 ;;
+              conflict) echo "::error::conflicting immutable snapshot release $tag"; return 1 ;;
+              absent) ;;
+              *) echo "::error::unknown snapshot release state: $state"; return 1 ;;
+            esac
+            if gh release create "$tag" --target "$SOURCE_COMMIT" \
+                --title "Immutable Linker snapshot $SNAPSHOT_ZST_SHA256" \
+                --notes "Content-addressed lines snapshot for exact weekly Linker handoff." \
+                --prerelease; then
+              return 0
+            fi
+            state=$(release_state) || state=query-error
+            case "$state" in exact|empty|pending) return 0 ;; conflict) return 1 ;; esac
+            switch_token || return 1
+            state=$(release_state) || return 1
+            case "$state" in
+              exact|empty|pending) return 0 ;;
+              conflict) return 1 ;;
+              absent)
+                gh release create "$tag" --target "$SOURCE_COMMIT" \
+                  --title "Immutable Linker snapshot $SNAPSHOT_ZST_SHA256" \
+                  --notes "Content-addressed lines snapshot for exact weekly Linker handoff." \
+                  --prerelease || {
+                    state=$(release_state) || return 1
+                    case "$state" in exact|empty|pending) return 0 ;; *) return 1 ;; esac
+                  }
+                ;;
+              *) echo "::error::unknown snapshot release state after credential fallback: $state"; return 1 ;;
+            esac
+          }
+          ensure_release
+          state=$(release_state)
+          if [ "$state" = empty ]; then
+            if ! gh release upload "$tag" "$snapshot"; then
+              state=$(release_state) || state=query-error
+              case "$state" in
+                exact|pending) ;;
+                conflict) exit 1 ;;
+                *)
+                  switch_token
+                  gh release upload "$tag" "$snapshot"
+                  ;;
+              esac
+            fi
+          elif [ "$state" = conflict ]; then
+            exit 1
+          fi
+          verified=false
+          for _ in $(seq 1 24); do
+            state=$(release_state) || state=query-error
+            case "$state" in
+              exact) verified=true; break ;;
+              conflict|absent|empty) break ;;
+            esac
+            sleep 5
+          done
+          [ "$verified" = true ] || {
+            echo "::error::snapshot release asset did not settle to the exact size and digest"
+            exit 1
+          }
+          echo "SNAPSHOT_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "Published immutable snapshot release $tag"
 
       # Trigger the incremental relink on LinkerToOtzaria against THIS snapshot and wait.
       # Serial by design: the DB release depends on the relink succeeding — a linker
@@ -788,14 +915,31 @@ jobs:
               .run_attempt == $attempt and .display_title == $title
             ' "$PARENT_JSON" >/dev/null || { echo "::error::recovery parent is not the exact failed build attempt for this correlation"; exit 1; }
 
-            RECOVERY_ARTIFACTS="$RUNNER_TEMP/relink-recovery-artifacts.json"
-            gh api --paginate "repos/Otzaria/LinkerToOtzaria/actions/runs/$RECOVERY_RUN_ID/artifacts?per_page=100" --slurp > "$RECOVERY_ARTIFACTS"
-            RECOVERY_ARTIFACT_COUNT=$(jq --arg name "linker-links-$RECOVERY_ATTEMPT" '[.[].artifacts[] | select(.name == $name and (.expired|not) and .size_in_bytes > 0)] | length' "$RECOVERY_ARTIFACTS")
-            [ "$RECOVERY_ARTIFACT_COUNT" -eq 1 ] || { echo "::error::recovery run must have exactly one live linker-links artifact"; exit 1; }
-            PARENT_ARTIFACTS="$RUNNER_TEMP/relink-recovery-parent-artifacts.json"
-            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$EXPECTED_PARENT_RUN_ID/artifacts?per_page=100" --slurp > "$PARENT_ARTIFACTS"
-            PARENT_SNAPSHOT_COUNT=$(jq --arg name "lines-snapshot-$EXPECTED_PARENT_RUN_ATTEMPT" '[.[].artifacts[] | select(.name == $name and (.expired|not) and .size_in_bytes > 0)] | length' "$PARENT_ARTIFACTS")
-            [ "$PARENT_SNAPSHOT_COUNT" -eq 1 ] || { echo "::error::recovery parent must retain exactly one live source snapshot artifact"; exit 1; }
+            RECOVERY_OUTPUT_TAG="linker-output-${RELINK_REQUEST_ID}-${RECOVERY_ATTEMPT}"
+            gh release view "$RECOVERY_OUTPUT_TAG" -R Otzaria/LinkerToOtzaria \
+              --json isDraft,isPrerelease,targetCommitish,assets > "$RUNNER_TEMP/relink-recovery-output-release.json"
+            python3 - "$RUNNER_TEMP/relink-recovery-output-release.json" "$RECOVERY_HEAD" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1],encoding="utf-8"))
+          names={item.get("name") for item in value.get("assets",[])}
+          if not (value.get("isDraft") is False and value.get("isPrerelease") is True and
+                  value.get("targetCommitish")==sys.argv[2] and
+                  names=={"linker_release_pointer.json","relink_manifest.json"}):
+              raise SystemExit("recovery Linker output release identity/assets differ")
+          PY
+            SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"
+            SNAPSHOT_RELEASE="$RUNNER_TEMP/relink-recovery-snapshot-release.json"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$SNAPSHOT_RELEASE_TAG" > "$SNAPSHOT_RELEASE"
+            python3 - "$SNAPSHOT_RELEASE" "$SNAPSHOT_RELEASE_TAG" "$SNAPSHOT_ZST_SHA256" <<'PY'
+          import json,sys
+          value=json.load(open(sys.argv[1],encoding="utf-8"))
+          all_assets=value.get("assets",[])
+          assets=[a for a in all_assets if a.get("name")=="lines_snapshot.db.zst"]
+          if not (value.get("tag_name")==sys.argv[2] and value.get("draft") is False and
+                  value.get("prerelease") is True and len(all_assets)==len(assets)==1 and
+                  assets[0].get("size",0)>0 and assets[0].get("digest")=="sha256:"+sys.argv[3]):
+              raise SystemExit("recovery parent snapshot release is missing or not byte-exact")
+          PY
 
             RUN="$RECOVERY_RUN_ID"
             {
@@ -951,8 +1095,9 @@ jobs:
             --state "$HOST_LEASE_STATE" --ttl 90000
           fi
 
-      # Inject the artifacts the relink run just produced into THIS DB. Downloaded from
-      # that exact run (not "latest release") so the handshake is fully deterministic.
+      # Inject the payload the relink run just produced into THIS DB. The exact
+      # request+attempt pointer names a content-addressed final Linker release; no
+      # Actions artifact storage and no moving "latest" pointer are involved.
       # -PlinkerStrict: in the serial cycle every source line must map and hash-match;
       # any stale/unmapped source means broken lineage → fail the build.
       - name: Apply LINKER links (Phase-2)
@@ -968,8 +1113,26 @@ jobs:
           rm -rf build/linker && mkdir -p build/linker
           RUN_ATTEMPT="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RELINK_RUN_ID" --jq .run_attempt)"
           [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          gh run download "$RELINK_RUN_ID" -R Otzaria/LinkerToOtzaria \
-            -n "linker-links-$RUN_ATTEMPT" -D build/linker
+          OUTPUT_TAG="linker-output-${EXPECTED_RELINK_REQUEST_ID}-${RUN_ATTEMPT}"
+          gh release download "$OUTPUT_TAG" -R Otzaria/LinkerToOtzaria \
+            -p linker_release_pointer.json -p relink_manifest.json -D build/linker
+          POINTER=build/linker/linker_release_pointer.json
+          LINKER_RELEASE_TAG="$(jq -er .release_tag "$POINTER")"
+          POINTER_PAYLOAD_SHA="$(jq -er .payload_sha256 "$POINTER")"
+          [[ "$LINKER_RELEASE_TAG" =~ ^linker-release-sha256-[0-9a-f]{64}$ ]]
+          [[ "$POINTER_PAYLOAD_SHA" =~ ^[0-9a-f]{64}$ ]]
+          jq -e --arg request "$EXPECTED_RELINK_REQUEST_ID" --argjson run "$RELINK_RUN_ID" \
+            --argjson attempt "$RUN_ATTEMPT" '
+              .schema_version==1 and .relink_request_id==$request and
+              .relink_run_id==$run and .relink_run_attempt==$attempt
+            ' "$POINTER" >/dev/null
+          gh release download "$LINKER_RELEASE_TAG" -R Otzaria/LinkerToOtzaria \
+            -p linker_links.zst -D build/linker
+          REMOTE_PAYLOAD_DIGEST="$(gh release view "$LINKER_RELEASE_TAG" -R Otzaria/LinkerToOtzaria \
+            --json assets --jq '.assets[]|select(.name=="linker_links.zst")|.digest')"
+          [ "$REMOTE_PAYLOAD_DIGEST" = "sha256:$POINTER_PAYLOAD_SHA" ] || {
+            echo "::error::Linker pointer differs from final release payload digest"; exit 1;
+          }
           # The relink manifest binds this payload to the exact inputs it was linked
           # against. Verify — fail-closed — that the payload matches its own digest, that
           # the relink used THIS build's pinned Sefaria vintage + snapshot, and that it is
@@ -1158,7 +1321,7 @@ jobs:
           cp build/seforim.db.zst "$STAGE/"
           cp build/seforim.db.buildstate "$STAGE/"
           # Lines snapshot for the linker (lineage + manual/standalone relink runs;
-          # the serial cycle already handed it to relink as a workflow artifact).
+          # the serial cycle already handed it to relink through its content-addressed release).
           cp build/lines_snapshot.db.zst "$STAGE/"
           # Patch fan (zero or more files; only present from release #2 on).
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
@@ -1506,13 +1669,12 @@ jobs:
           PY
           sha256sum pipeline-result/pipeline-result.json | cut -d' ' -f1 > pipeline-result/pipeline-result.sha256
 
-      - name: Upload exact child result
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-result-${{ github.run_attempt }}
-          path: pipeline-result/
-          if-no-files-found: error
-          retention-days: 90
+      - name: Publish exact child result release
+        run: >-
+          bash .pipeline-control/.github/scripts/publish_release_handoff.sh
+          "pipeline-result-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          "Immutable Seforim pipeline result ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          "$GITHUB_SHA" pipeline-result/pipeline-result.json pipeline-result/pipeline-result.sha256
 
       # Release the RAM tmpfs no matter how the job ended. By now assets are
       # already uploaded and staged on real disk, so discarding build/ is safe;
@@ -1643,6 +1805,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Checkout pipeline handoff publisher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            .github/scripts
+          persist-credentials: false
       - name: Write exact child result
         env:
           CORRELATION_ID: ${{ inputs.correlation_id }}
@@ -1698,15 +1867,15 @@ jobs:
           )
           PY
           sha256sum pipeline-result/pipeline-result.json | cut -d' ' -f1 > pipeline-result/pipeline-result.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-result-${{ github.run_attempt }}
-          path: pipeline-result/
-          if-no-files-found: error
-          retention-days: 90
+      - name: Publish exact reused child result release
+        run: >-
+          bash .github/scripts/publish_release_handoff.sh
+          "pipeline-result-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          "Immutable reused Seforim pipeline result ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          "$GITHUB_SHA" pipeline-result/pipeline-result.json pipeline-result/pipeline-result.sha256
 
   saga-callback:
-    name: Notify event-driven parent after exact result artifact exists
+    name: Notify event-driven parent after exact result release exists
     needs: [build-and-release, reuse-result]
     if: ${{ always() && inputs.saga_run_id != '' && (needs.build-and-release.result == 'success' || needs.reuse-result.result == 'success') }}
     runs-on: ubuntu-latest
@@ -1757,7 +1926,7 @@ jobs:
             LATEST_ARG=(--argjson latest null)
           fi
           ALL_RELEASES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq '.[] | select(.draft|not) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
+            --jq '.[] | select((.draft|not) and (.prerelease|not)) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
             | jq -sc '.')
           # Derive the timestamp from immutable release state.  A verified reuse
           # must regenerate the same bytes instead of committing a wall-clock-only

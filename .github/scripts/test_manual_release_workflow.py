@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "manual-generate-release.yml"
+MANIFEST_WORKFLOW = Path(__file__).parents[1] / "workflows" / "update-release-manifest.yml"
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -44,6 +45,34 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('echo "KAGGLE_TITLE=kaggle-relink request=$RELINK_REQUEST_ID', relink)
         self.assertIn(': "${RELINK_TITLE:=}"', cleanup)
         self.assertIn(': "${KAGGLE_TITLE:=}"', cleanup)
+
+    def test_large_snapshot_uses_content_addressed_release_not_actions_artifact(self):
+        publish = self.step("Publish immutable snapshot release for the relink run")
+        self.assertIn('tag="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"', publish)
+        self.assertIn('gh release create "$tag"', publish)
+        self.assertIn('gh release upload "$tag" "$snapshot"', publish)
+        self.assertIn('digest=="sha256:"+sys.argv[3]', publish)
+        self.assertNotIn("actions/upload-artifact", publish)
+        self.assertNotIn("Upload snapshot artifact for the relink run", self.workflow)
+
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        self.assertIn('SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"', relink)
+        self.assertIn("recovery parent snapshot release is missing or not byte-exact", relink)
+        self.assertNotIn("recovery parent must retain exactly one live source snapshot artifact", relink)
+
+    def test_weekly_workflow_has_no_actions_artifact_handoffs(self):
+        self.assertNotIn("actions/upload-artifact", self.workflow)
+        self.assertNotIn("actions/download-artifact", self.workflow)
+        self.assertNotIn("gh run download", self.workflow)
+        self.assertIn("pipeline-result-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", self.workflow)
+        self.assertIn("linker-output-${EXPECTED_RELINK_REQUEST_ID}-${RUN_ATTEMPT}", self.workflow)
+
+    def test_handoff_prereleases_do_not_pollute_database_manifest(self):
+        refresh = self.workflow.split("  refresh-release-manifest:\n", 1)[1]
+        self.assertIn("(.prerelease|not)", refresh)
+        standalone = MANIFEST_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("(.prerelease|not)", standalone)
+        self.assertIn("github.event.release.prerelease == false", standalone)
 
     def test_split_kaggle_child_releases_and_reacquires_host_lease(self):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
