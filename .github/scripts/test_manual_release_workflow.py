@@ -3,6 +3,7 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "manual-generate-release.yml"
 MANIFEST_WORKFLOW = Path(__file__).parents[1] / "workflows" / "update-release-manifest.yml"
+HANDOFF_PUBLISHER = Path(__file__).parent / "publish_release_handoff.sh"
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -128,6 +129,11 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn(legacy_skip, lookup)
         self.assertLess(lookup.index(validation), lookup.index(requested_source_guard))
         self.assertLess(lookup.index(requested_source_guard), lookup.index(legacy_skip))
+
+    def test_release_publisher_rejects_asset_names_github_would_normalize(self):
+        helper = HANDOFF_PUBLISHER.read_text(encoding="utf-8")
+        self.assertIn("release asset basename is unsafe or would be normalized by GitHub", helper)
+        self.assertIn("^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$", helper)
 
 
 if __name__ == "__main__":
