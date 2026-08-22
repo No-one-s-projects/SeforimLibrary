@@ -1,0 +1,39 @@
+name: Recovery guard · Reconcile Linker after failed Seforim build
+run-name: reconcile-linker parent=${{ github.event.workflow_run.id }}:${{ github.event.workflow_run.run_attempt }}
+
+# A successful build needs no guard runner. GitHub records this workflow event,
+# but the job below is skipped without allocating a runner. A failed, cancelled,
+# or timed-out build wakes the Linker reconciler exactly once.
+on:
+  workflow_run:
+    workflows:
+      - Weekly 5–6/6 · Build, link, validate and publish Seforim DB
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: reconcile-linker-parent-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    if: ${{ github.event.workflow_run.conclusion != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+    steps:
+      - name: Wake Linker orphan reconciliation once
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::PIPELINE_TOKEN is required to wake Linker reconciliation"
+            exit 1
+          }
+          for attempt in 1 2 3; do
+            gh workflow run reconcile-pipeline.yml -R Otzaria/LinkerToOtzaria && exit 0
+            [ "$attempt" = 3 ] || sleep "$((attempt * 5))"
+          done
+          echo "::error::failed to wake Linker reconciliation after three attempts"
+          exit 1

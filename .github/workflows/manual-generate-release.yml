@@ -1707,7 +1707,8 @@ jobs:
       # kaggle-relink DISPATCHER first and wait (bounded) until it is terminal — its own
       # SIGTERM trap cancels a child it already queued — then cancel any relink worker,
       # then re-scan a bounded window for a child that appeared mid-sweep. Anything still
-      # invisible is reaped by reconcile-pipeline (keyed on the same request id).
+      # invisible is reaped by the failure-event-driven reconcile-pipeline
+      # invocation (keyed on the same request id).
       # Best-effort: never fails the job, and runs after the result artifact upload.
       - name: Cancel any in-flight relink for this build (no orphaned linker run)
         if: always()
@@ -1781,9 +1782,9 @@ jobs:
           done
           scan_all
           if [ -n "${LIVE// /}" ]; then
-            echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID runs='$LIVE' — cleanup could not terminate everything; reconcile-pipeline reaps by this request id."
+            echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID runs='$LIVE' — cleanup could not terminate everything; the failure-event reconciler reaps by this request id."
           elif [ "$QUERY_OK" -ne 1 ]; then
-            echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID query_ok=0 — one or more scans failed; a live run may be invisible. reconcile-pipeline reaps by this request id."
+            echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID query_ok=0 — one or more scans failed; a live run may be invisible. The failure-event reconciler reaps by this request id."
           else
             echo "relink orphan-cleanup done for request=$RELINK_REQUEST_ID."
           fi
