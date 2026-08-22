@@ -4,6 +4,9 @@ from pathlib import Path
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "manual-generate-release.yml"
 MANIFEST_WORKFLOW = Path(__file__).parents[1] / "workflows" / "update-release-manifest.yml"
 HANDOFF_PUBLISHER = Path(__file__).parent / "publish_release_handoff.sh"
+FAILURE_RECONCILER = (
+    Path(__file__).parents[1] / "workflows" / "reconcile-linker-after-failure.yml"
+)
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -15,6 +18,27 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         marker = f"      - name: {name}\n"
         self.assertEqual(self.workflow.count(marker), 1, f"step {name!r} must exist exactly once")
         return self.workflow.split(marker, 1)[1].split("\n      - ", 1)[0]
+
+    def test_linker_reconciliation_is_failure_event_driven(self):
+        workflow = FAILURE_RECONCILER.read_text(encoding="utf-8")
+        header = workflow.split("jobs:\n", 1)[0]
+
+        self.assertIn("workflow_run:", header)
+        self.assertIn(
+            "Weekly 5–6/6 · Build, link, validate and publish Seforim DB",
+            header,
+        )
+        self.assertNotIn("schedule:", header)
+        self.assertNotIn("cron:", header)
+        self.assertIn(
+            "if: ${{ github.event.workflow_run.conclusion != 'success' }}",
+            workflow,
+        )
+        self.assertIn(
+            "gh workflow run reconcile-pipeline.yml -R Otzaria/LinkerToOtzaria",
+            workflow,
+        )
+        self.assertIn("GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}", workflow)
 
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")
