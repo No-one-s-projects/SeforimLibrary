@@ -24,6 +24,9 @@ import kotlin.system.exitProcess
  * `source.name` (via `book.sourceId`) + `COALESCE(book.heRef, book.title)`
  * (both importers store `heRef == canonicalHeTitle`). `line_index` is carried
  * verbatim so it maps 1:1 back to `line.lineIndex` at build time.
+ * `context_ref` is the exact Sefaria location of the source line (falling back
+ * to the canonical book title only for structural/non-Sefaria lines). The
+ * linker may use it only for explicit relative citations such as לעיל/לקמן.
  *
  * Usage:
  *   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db
@@ -80,7 +83,8 @@ fun main(args: Array<String>) {
                         source_name        TEXT    NOT NULL,
                         canonical_he_title TEXT    NOT NULL,
                         line_index         INTEGER NOT NULL,
-                        content            TEXT    NOT NULL
+                        content            TEXT    NOT NULL,
+                        context_ref        TEXT    NOT NULL
                     )
                     """.trimIndent(),
                 )
@@ -101,7 +105,11 @@ fun main(args: Array<String>) {
             }
 
             val insert = out.prepareStatement(
-                "INSERT INTO lines_snapshot(source_name, canonical_he_title, line_index, content) VALUES(?,?,?,?)",
+                """
+                INSERT INTO lines_snapshot(
+                    source_name, canonical_he_title, line_index, content, context_ref
+                ) VALUES(?,?,?,?,?)
+                """.trimIndent(),
             )
             out.autoCommit = false
 
@@ -117,7 +125,8 @@ fun main(args: Array<String>) {
                     SELECT s.name AS source_name,
                            COALESCE(b.heRef, b.title) AS canonical_he_title,
                            l.lineIndex AS line_index,
-                           l.content   AS content
+                           l.content   AS content,
+                           COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title)) AS context_ref
                     FROM line l
                     JOIN book b   ON l.bookId = b.id
                     JOIN source s ON b.sourceId = s.id
@@ -130,10 +139,12 @@ fun main(args: Array<String>) {
                         val title = rs.getString(2)
                         val lineIndex = rs.getLong(3)
                         val content = rs.getString(4) ?: ""
+                        val contextRef = rs.getString(5) ?: title
                         insert.setString(1, sourceName)
                         insert.setString(2, title)
                         insert.setLong(3, lineIndex)
                         insert.setString(4, content)
+                        insert.setString(5, contextRef)
                         insert.addBatch()
                         lines++
                         val key = sourceName to title
@@ -163,7 +174,8 @@ fun main(args: Array<String>) {
             }
             out.prepareStatement("INSERT INTO lines_snapshot_meta(key, value) VALUES(?,?)").use { m ->
                 fun put(k: String, v: String) { m.setString(1, k); m.setString(2, v); m.executeUpdate() }
-                put("schema_version", "1")
+                put("schema_version", "2")
+                put("context_policy", "explicit-relative-v1")
                 put("source_db", srcDb.fileName.toString())
                 put("book_count", books.toString())
                 put("line_count", lines.toString())

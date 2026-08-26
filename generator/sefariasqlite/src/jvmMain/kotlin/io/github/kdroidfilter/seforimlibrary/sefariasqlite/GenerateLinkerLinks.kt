@@ -83,20 +83,45 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA synchronous = OFF")
         repository.executeRawQuery("PRAGMA journal_mode = OFF")
 
-        // ── sidecar → refsByCanonical / refsByBase + (path,lineIndex)→lineId ──
+        // LINKER is a generated, type-owned projection. Replace it by type so
+        // links that the engine intentionally stopped emitting (especially old
+        // heading links) cannot survive forever through upserts.
+        var replacedLinks = 0L
+        driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM link WHERE connectionTypeId = ?",
+            { cursor ->
+                if (cursor.next().value) replacedLinks = cursor.getLong(0) ?: 0L
+                QueryResult.Value(Unit)
+            },
+            1,
+        ) { bindLong(0, ctLinker) }
+        if (replacedLinks > 0) {
+            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $ctLinker"
+            repository.executeRawQuery("DELETE FROM link_anchor WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $ctLinker")
+            logger.i { "Removed $replacedLinks existing LINKER links before deterministic rebuild" }
+        }
+
+        // ── sidecar → refsByCanonical / refsByBase + exact target identity ──
         logger.i { "Loading sidecar…" }
         val allRefs = ArrayList<RefEntry>()
         val lineIdByRefKey = HashMap<Pair<String, Int>, Long>()
-        File(sidecarPath).bufferedReader(Charsets.UTF_8).useLines { lines ->
-            for (line in lines) {
-                if (line.isBlank()) continue
-                val f = line.split('\t')
-                if (f.size < 5) continue
-                val ref = f[0]; val heRef = f[1]; val path = f[2]
-                val lineIndex = f[3].toInt(); val lineId = f[4].toLong()
-                allRefs.add(RefEntry(ref, heRef, path, lineIndex))
-                lineIdByRefKey[path to lineIndex] = lineId
+        val stableBookKeyByRefKey = HashMap<Pair<String, Int>, Pair<String, String>>()
+        for (row in readLinkerSidecar(sidecarPath)) {
+            val key = row.path to row.lineIndex
+            val previousLineId = lineIdByRefKey.putIfAbsent(key, row.lineId)
+            check(previousLineId == null || previousLineId == row.lineId) {
+                "Conflicting line IDs in linker sidecar for $key"
             }
+            val stableBookKey = row.sourceName to row.canonicalHeTitle
+            val previousBookKey = stableBookKeyByRefKey.putIfAbsent(key, stableBookKey)
+            check(previousBookKey == null || previousBookKey == stableBookKey) {
+                "Conflicting stable book identities in linker sidecar for $key"
+            }
+            allRefs.add(RefEntry(row.ref, row.heRef, row.path, row.lineIndex))
         }
         val refsByCanonical = allRefs.groupBy { canonicalCitation(it.ref) }
         val refsByBase = HashMap<String, RefEntry>()
@@ -126,13 +151,14 @@ fun main(args: Array<String>) = runBlocking {
         // METADATA ONLY — never `content`: on the real DB (≈5.9M lines / 2.4GiB text) loading all
         // content OOMs. `content` is fetched lazily below, only for the few lines that get anchors.
         val lineIdByBookLine = HashMap<Pair<Long, Int>, Long>()
-        val lineMeta = HashMap<Long, Pair<Long, Int>>()      // lineId → (bookId, 0-based lineIndex)
-        driver.executeQuery(null, "SELECT id, bookId, lineIndex FROM line",
+        data class TargetLineMeta(val bookId: Long, val lineIndex: Int, val heRef: String?)
+        val lineMeta = HashMap<Long, TargetLineMeta>()
+        driver.executeQuery(null, "SELECT id, bookId, lineIndex, heRef FROM line",
             { c ->
                 while (c.next().value) {
                     val id = c.getLong(0)!!; val bookId = c.getLong(1)!!; val idx = c.getLong(2)!!.toInt()
                     lineIdByBookLine[bookId to idx] = id
-                    lineMeta[id] = bookId to idx
+                    lineMeta[id] = TargetLineMeta(bookId, idx, c.getString(3))
                 }
                 QueryResult.Value(Unit)
             }, 0)
@@ -143,15 +169,34 @@ fun main(args: Array<String>) = runBlocking {
         // the same line; an unbounded cache holds every linked line's text and OOMs (~GBs).
         var cachedLineId = Long.MIN_VALUE
         var cachedContent = ""
+        var cachedContextRef = ""
         fun contentFor(id: Long): String {
             if (id != cachedLineId) {
                 var s = ""
-                driver.executeQuery(1001, "SELECT content FROM line WHERE id = ?",
-                    { c -> if (c.next().value) s = c.getString(0) ?: ""; QueryResult.Value(Unit) },
+                var contextRef = ""
+                driver.executeQuery(1001,
+                    """
+                    SELECT l.content,
+                           COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title))
+                    FROM line l JOIN book b ON l.bookId = b.id WHERE l.id = ?
+                    """.trimIndent(),
+                    { c ->
+                        if (c.next().value) {
+                            s = c.getString(0) ?: ""
+                            contextRef = c.getString(1) ?: ""
+                        }
+                        QueryResult.Value(Unit)
+                    },
                     1) { bindLong(0, id) }
-                cachedLineId = id; cachedContent = s
+                cachedLineId = id
+                cachedContent = s
+                cachedContextRef = contextRef
             }
             return cachedContent
+        }
+        fun contextRefFor(id: Long): String {
+            contentFor(id)
+            return cachedContextRef
         }
         // linkerContentHash MUST match linker_artifact.content_hash so the source-drift guard agrees.
         fun hashFor(id: Long): String = linkerContentHash(contentFor(id))
@@ -176,7 +221,9 @@ fun main(args: Array<String>) = runBlocking {
         // the key) or need per-anchor scope columns (schema+app change) — not worth
         // it for the ~0.07% of ranges affected.
         val rangeEndByLink = HashMap<Long, Pair<Long, Int>>()
-        var links = 0; var anchors = 0; var unresolvedTarget = 0; var unmappedSource = 0; var staleSource = 0
+        var links = 0; var anchors = 0; var unresolvedTarget = 0; var ambiguousTarget = 0
+        var targetIdentityMismatch = 0; var unmappedSource = 0; var staleSource = 0; var staleContext = 0
+        var headingSource = 0
         var missingSourceHash = 0
 
         suspend fun flush() {
@@ -191,14 +238,30 @@ fun main(args: Array<String>) = runBlocking {
                 for (line in lines) {
                     if (line.isBlank()) continue
                     val rec = json.decodeFromString<ArtifactRecord>(line)
+                    check((rec.context_ref == null) == (rec.relative_direction == null)) {
+                        "Malformed contextual LINKER record in ${file.path}: context_ref and " +
+                            "relative_direction must be present together"
+                    }
+                    check(rec.relative_direction == null || rec.relative_direction in setOf("above", "below")) {
+                        "Malformed contextual LINKER record in ${file.path}: invalid relative_direction"
+                    }
                     // Contract check FIRST, before any skip path (unresolved target,
                     // self-link) can hide a hash-less record from -PlinkerStrict.
                     if (rec.source_hash == null) missingSourceHash++
                     // target: resolveRefs → RefEntry → lineId (sidecar) → (bookId, 0-based idx) via lineMeta
-                    val tgtEntry = resolveRefs(rec.target_ref, refsByCanonical, refsByBase).firstOrNull()
+                    val targetCandidates = resolveRefs(rec.target_ref, refsByCanonical, refsByBase)
+                        .distinctBy { it.path to it.lineIndex }
+                    if (targetCandidates.size > 1) { ambiguousTarget++; continue }
+                    val tgtEntry = targetCandidates.singleOrNull()
                     val tgtLineId = tgtEntry?.let { lineIdByRefKey[it.path to it.lineIndex] }
                     val tgtMeta = tgtLineId?.let { lineMeta[it] }
                     if (tgtLineId == null || tgtMeta == null) { unresolvedTarget++; continue }
+                    val expectedTargetKey = stableBookKeyByRefKey[tgtEntry.path to tgtEntry.lineIndex]
+                    val expectedTargetBookId = expectedTargetKey?.let { bookIdByKey[it] }
+                    if (!targetIdentityMatches(tgtEntry, tgtMeta.bookId, tgtMeta.lineIndex, tgtMeta.heRef, expectedTargetBookId)) {
+                        targetIdentityMismatch++
+                        continue
+                    }
                     // source: BookKey → bookId → (bookId, line_index) → lineId
                     val srcBookId = bookIdByKey[rec.book_key.source_name to rec.book_key.canonical_he_title]
                     val srcLineId = srcBookId?.let { lineIdByBookLine[it to rec.line_index] }
@@ -211,16 +274,18 @@ fun main(args: Array<String>) = runBlocking {
                     // A record with NO hash bypasses the guard — already counted at decode,
                     // fatal under -PlinkerStrict (every engine-produced record carries one).
                     val content = contentFor(srcLineId)
+                    if (isHeadingContent(content)) { headingSource++; continue }
                     if (rec.source_hash != null && hashFor(srcLineId) != rec.source_hash) { staleSource++; continue }
+                    if (rec.context_ref != null && contextRefFor(srcLineId) != rec.context_ref) { staleContext++; continue }
 
                     // One link per (src,tgt); reuse its id for repeated citations of the same ref.
                     val pair = srcLineId to tgtLineId
                     val linkId = linkIdByPair.getOrPut(pair) {
                         val id = allocator.linkId(srcLineId, tgtLineId, ctLinker)
                         linkBatch.add(Link(
-                            id = id, sourceBookId = srcBookId, targetBookId = tgtMeta.first,
+                            id = id, sourceBookId = srcBookId, targetBookId = tgtMeta.bookId,
                             sourceLineId = srcLineId, targetLineId = tgtLineId,
-                            targetLineIndex = tgtMeta.second, connectionType = ConnectionType.LINKER,
+                            targetLineIndex = tgtMeta.lineIndex, connectionType = ConnectionType.LINKER,
                         ))
                         links++
                         id
@@ -243,11 +308,17 @@ fun main(args: Array<String>) = runBlocking {
                     ) {
                         val endLineId = lineIdByRefKey[endEntry.path to endEntry.lineIndex]
                         val endMeta = endLineId?.let { lineMeta[it] }
-                        if (endLineId != null && endMeta != null) {
+                        val expectedEndKey = stableBookKeyByRefKey[endEntry.path to endEntry.lineIndex]
+                        val expectedEndBookId = expectedEndKey?.let { bookIdByKey[it] }
+                        if (endLineId != null && endMeta != null &&
+                            targetIdentityMatches(endEntry, endMeta.bookId, endMeta.lineIndex, endMeta.heRef, expectedEndBookId)
+                        ) {
                             val prev = rangeEndByLink[linkId]
-                            if (prev == null || endMeta.second > prev.second) {
-                                rangeEndByLink[linkId] = endLineId to endMeta.second
+                            if (prev == null || endMeta.lineIndex > prev.second) {
+                                rangeEndByLink[linkId] = endLineId to endMeta.lineIndex
                             }
+                        } else if (endLineId != null || endMeta != null) {
+                            targetIdentityMismatch++
                         }
                     }
                     if (linkBatch.size >= 5000) flush()
@@ -261,24 +332,32 @@ fun main(args: Array<String>) = runBlocking {
             }
             ranges.chunked(5000).forEach { repository.insertLinkRangesBatch(it) }
         }
-        logger.i { "LINKER: $links links, $anchors anchors, ${rangeEndByLink.size} target ranges (unresolved target: $unresolvedTarget, unmapped source: $unmappedSource, stale source: $staleSource)" }
+        logger.i {
+            "LINKER: $links links, $anchors anchors, ${rangeEndByLink.size} target ranges " +
+                "(heading source: $headingSource, unresolved target: $unresolvedTarget, " +
+                "ambiguous target: $ambiguousTarget, target identity mismatch: $targetIdentityMismatch, " +
+                "unmapped source: $unmappedSource, stale source: $staleSource, stale context: $staleContext)"
+        }
 
         // Serial-pipeline invariant (-PlinkerStrict): the linker just ran on THIS build's
         // snapshot, so every record's source line must exist, carry a hash, and match it.
         // A violation means the artifacts came from some other snapshot — fail the build.
         // (unresolvedTarget stays advisory: refs to books outside the corpus are expected.)
         if (prop("linkerStrict", null)?.toBoolean() == true) {
-            check(unmappedSource == 0 && staleSource == 0 && missingSourceHash == 0) {
+            check(unmappedSource == 0 && staleSource == 0 && staleContext == 0 &&
+                targetIdentityMismatch == 0 && ambiguousTarget == 0 && missingSourceHash == 0
+            ) {
                 "linkerStrict: unmapped source=$unmappedSource, stale source=$staleSource, " +
-                    "missing source_hash=$missingSourceHash — artifacts do not match this build's snapshot"
+                    "stale context=$staleContext, ambiguous target=$ambiguousTarget, " +
+                    "target identity mismatch=$targetIdentityMismatch, missing source_hash=$missingSourceHash — " +
+                    "artifacts/sidecar do not match this build's exact identity lineage"
             }
         }
 
-        // LINKER links were inserted AFTER the Sefaria import's book_has_links pass, so refresh the
-        // source/target flags — additively (never reset to 0) — or a book that gained ONLY linker
-        // links would still read hasSourceLinks=0 and the app would treat it as link-less.
+        // LINKER was type-replaced above, so refresh these materialized flags exactly.
         repository.executeRawQuery(
             "INSERT OR IGNORE INTO book_has_links(bookId, hasSourceLinks, hasTargetLinks) SELECT id, 0, 0 FROM book")
+        repository.executeRawQuery("UPDATE book_has_links SET hasSourceLinks=0, hasTargetLinks=0")
         repository.executeRawQuery(
             "UPDATE book_has_links SET hasSourceLinks=1 WHERE bookId IN (SELECT DISTINCT sourceBookId FROM link)")
         repository.executeRawQuery(
@@ -307,6 +386,25 @@ internal fun linkerContentHash(content: String): String {
     return sb.substring(0, 16)
 }
 
+private val headingContentRegex = Regex(
+    pattern = "^[\\s\\uFEFF]*<h[1-6](?:\\s|>)",
+    option = RegexOption.IGNORE_CASE,
+)
+
+internal fun isHeadingContent(content: String): Boolean =
+    headingContentRegex.containsMatchIn(content)
+
+internal fun targetIdentityMatches(
+    entry: RefEntry,
+    actualBookId: Long,
+    actualLineIndex: Int,
+    actualHeRef: String?,
+    expectedBookId: Long?,
+): Boolean = expectedBookId != null &&
+    actualBookId == expectedBookId &&
+    actualLineIndex == entry.lineIndex - 1 &&
+    actualHeRef == entry.heRef
+
 @Serializable
 private data class ArtifactBookKey(val source_name: String, val canonical_he_title: String)
 
@@ -320,6 +418,8 @@ private data class ArtifactRecord(
     val line_index_base: Int = 0,
     val source_path: String? = null,
     val source_hash: String? = null,
+    val context_ref: String? = null,
+    val relative_direction: String? = null,
 )
 
 private fun prop(name: String, fallback: String?): String? =

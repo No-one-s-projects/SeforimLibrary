@@ -4,7 +4,9 @@ import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import java.nio.file.Files
 
 /**
  * Proves the resolver-reuse mechanism the Phase-2 LINKER importer relies on: build
@@ -138,5 +140,55 @@ class GenerateLinkerLinksTest {
         assertEquals("aaf4c61ddcc5e8a2", linkerContentHash("hello"))
         assertEquals("643cbc0fbf2800d7", linkerContentHash("שלום עולם"))
         assertEquals("da39a3ee5e6b4b0d", linkerContentHash(""))
+    }
+
+    @Test
+    fun headingsAreRejectedWithWhitespaceAndAllHeadingLevels() {
+        assertTrue(isHeadingContent("<h1>ספר</h1>"))
+        assertTrue(isHeadingContent("  \uFEFF<H6 class=\"x\">פרק</H6>"))
+        assertFalse(isHeadingContent("לפני <h2>כותרת בתוך הטקסט</h2>"))
+        assertFalse(isHeadingContent("<header>כותרת</header>"))
+    }
+
+    @Test
+    fun targetIdentityRequiresBookLineAndSemanticRef() {
+        val entry = RefEntry("Genesis 1:1", "בראשית א, א", "Genesis", 7)
+        assertTrue(targetIdentityMatches(entry, 11, 6, "בראשית א, א", 11))
+        assertFalse(targetIdentityMatches(entry, 12, 6, "בראשית א, א", 11))
+        assertFalse(targetIdentityMatches(entry, 11, 7, "בראשית א, א", 11))
+        assertFalse(targetIdentityMatches(entry, 11, 6, "שמות א, א", 11))
+        assertFalse(targetIdentityMatches(entry, 11, 6, "בראשית א, א", null))
+    }
+
+    @Test
+    fun sidecarV2RoundTripsStableIdentityAndRejectsLegacyRows() {
+        val directory = Files.createTempDirectory("linker-sidecar-test")
+        val path = directory.resolve("refs.tsv")
+        try {
+            val entry = RefEntry("Genesis 1:1", "בראשית א, א", "Tanakh/Genesis", 1)
+            writeLinkerSidecar(
+                path.toString(),
+                listOf(entry),
+                mapOf((entry.path to 0) to 123L),
+                mapOf(entry.path to "בראשית"),
+                "ספריא",
+            )
+            assertEquals(
+                listOf(
+                    LinkerSidecarEntry(
+                        "Genesis 1:1", "בראשית א, א", "Tanakh/Genesis", 1,
+                        123L, "ספריא", "בראשית",
+                    ),
+                ),
+                readLinkerSidecar(path.toString()),
+            )
+            Files.writeString(path, "Genesis 1:1\tבראשית א, א\tTanakh/Genesis\t1\t123\n")
+            val error = runCatching { readLinkerSidecar(path.toString()) }.exceptionOrNull()
+            assertNotNull(error)
+            assertTrue(error.message.orEmpty().contains("sidecar header"))
+        } finally {
+            Files.deleteIfExists(path)
+            Files.deleteIfExists(directory)
+        }
     }
 }
