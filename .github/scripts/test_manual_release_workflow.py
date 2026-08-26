@@ -40,6 +40,28 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}", workflow)
 
+    def test_local_host_is_the_default_db_and_linker_target(self):
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        runner_input = self.workflow.split("      runner_selection:\n", 1)[1].split(
+            "      prerelease:\n", 1
+        )[0]
+
+        self.assertIn("default: 'local'", runner_input)
+        self.assertIn("- 'local'", runner_input)
+        self.assertIn("otzaria-db", self.workflow)
+        self.assertIn("vars.SERIAL_LINKER_TARGET || 'local'", relink)
+        self.assertIn('local|kaggle|server)', relink)
+        self.assertIn('-f library_run_id="$GITHUB_RUN_ID" -f target=local', relink)
+
+    def test_durable_host_skips_reinstalling_existing_dependencies(self):
+        root = Path(__file__).parents[2]
+        installer = (root / ".github/scripts/install-db-workflow-deps.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("for tool in gh sqlite3 zstd unzstd jq curl unzip", installer)
+        self.assertIn("skipping package-manager work", installer)
+
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")
         self.assertLess(
@@ -109,7 +131,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "python3 .pipeline-control/.github/scripts/host_lease.py start \\\n"
             "            --lock /run/lock/otzaria/host-heavy.lock"
         )
-        dispatch_case = 'case "$SERIAL_LINKER_TARGET" in\n            kaggle)'
+        dispatch_case = 'case "$SERIAL_LINKER_TARGET" in\n            local)'
         terminal = "completed:success) break"
 
         self.assertEqual(relink.count(release), 1)

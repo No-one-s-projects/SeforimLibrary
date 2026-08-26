@@ -10,6 +10,18 @@ OS_ID="${ID:-unknown}"
 OS_ID_LIKE="${ID_LIKE:-}"
 OS_FAMILY="$OS_ID $OS_ID_LIKE"
 
+# A self-hosted build machine is durable. Avoid package-index downloads and
+# reinstall attempts on every weekly run once the complete toolset is already
+# present; fresh/ephemeral runners still fall through to the installer below.
+all_present=true
+for tool in gh sqlite3 zstd unzstd jq curl unzip; do
+  command -v "$tool" >/dev/null 2>&1 || all_present=false
+done
+if [ "$all_present" = true ]; then
+  echo "DB workflow dependencies are already installed; skipping package-manager work."
+  exit 0
+fi
+
 if echo "$OS_FAMILY" | grep -qiE 'debian|ubuntu'; then
   sudo apt-get update
   sudo apt-get install -y --no-install-recommends sqlite3 zstd jq curl unzip

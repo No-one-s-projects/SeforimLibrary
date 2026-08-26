@@ -23,9 +23,10 @@ on:
       runner_selection:
         description: 'בחר על איזה שרת להריץ את הבנייה'
         required: true
-        default: 'ARM64'
+        default: 'local'
         type: choice
         options:
+          - 'local'
           - 'ARM64'
           - 'server-2'
       prerelease:
@@ -285,7 +286,7 @@ jobs:
     name: Build seforim.db + bundle + delta fan, publish release
     needs: reconcile
     if: needs.reconcile.outputs.reuse != 'true'
-    runs-on: ${{ inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]') }}
+    runs-on: ${{ inputs.runner_selection == 'local' && fromJSON('["otzaria-db"]') || (inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]')) }}
     # Self-hosted jobs have a five-day execution ceiling.  The split child may legally
     # consume 90m GPU NER + 480m CPU resolution (including lease wait) + 30m publish,
     # after this parent has already spent hours generating the DB.  Keep a full 24h
@@ -872,11 +873,10 @@ jobs:
         id: relink
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
-          # Operator toggle (repo variable, no code change to flip): 'kaggle' (default)
-          # runs NER on a Kaggle GPU and resolves the raw NER on the Oracle ARM box;
-          # 'server' runs the legacy unsplit relink on the Oracle ARM box. Set with:
-          # gh variable set SERIAL_LINKER_TARGET -R Otzaria/SeforimLibrary -b kaggle
-          SERIAL_LINKER_TARGET: ${{ vars.SERIAL_LINKER_TARGET || 'kaggle' }}
+          # Operator toggle (repo variable, no code change to flip): 'local' (default)
+          # runs the complete relink on the durable x64/ROCm host. 'kaggle' retains
+          # the split fallback and 'server' retains the Oracle fallback.
+          SERIAL_LINKER_TARGET: ${{ vars.SERIAL_LINKER_TARGET || 'local' }}
           CORRELATION_ID: ${{ inputs.correlation_id }}
           SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
@@ -1000,11 +1000,19 @@ jobs:
           # Inputs reach the dispatch ONLY via env (validated sha/tag shapes at job
           # entry) — nothing raw is interpolated into this script body.
           case "$SERIAL_LINKER_TARGET" in
-            kaggle|server) ;;
-            *) echo "::error::SERIAL_LINKER_TARGET must be 'kaggle' or 'server', got '$SERIAL_LINKER_TARGET'"; exit 1 ;;
+            local|kaggle|server) ;;
+            *) echo "::error::SERIAL_LINKER_TARGET must be 'local', 'kaggle' or 'server', got '$SERIAL_LINKER_TARGET'"; exit 1 ;;
           esac
           python3 .pipeline-control/.github/scripts/host_lease.py release --state "$HOST_LEASE_STATE"
           case "$SERIAL_LINKER_TARGET" in
+            local)
+              gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
+                -f library_run_id="$GITHUB_RUN_ID" -f target=local \
+                -f relink_request_id="$RELINK_REQUEST_ID" \
+                -f parent_run_attempt="$GITHUB_RUN_ATTEMPT" \
+                -f sefaria_tag="$SEFARIA_TAG" \
+                -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
+                -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
             kaggle)
               gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
                 -f library_run_id="$GITHUB_RUN_ID" \
