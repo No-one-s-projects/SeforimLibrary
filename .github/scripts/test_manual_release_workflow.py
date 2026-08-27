@@ -66,10 +66,21 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         java = self.step("Verify durable Java 25 toolchain")
 
         self.assertNotIn("actions/setup-java", self.workflow)
+        self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
         self.assertIn("command -v java", java)
         self.assertIn("command -v javac", java)
         self.assertIn('[[ "$java_version" == 25 || "$java_version" == 25.* ]]', java)
         self.assertIn('echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"', java)
+
+    def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
+        extract = self.step("Verify pinned lineage and extract exact inputs")
+
+        self.assertIn('SEFARIA_EXTRACT_ROOT="$INPUTS/sefaria-extract"', extract)
+        self.assertIn('test -d "$SEFARIA_EXTRACT_ROOT/json"', extract)
+        self.assertIn('test -d "$SEFARIA_EXTRACT_ROOT/schemas"', extract)
+        self.assertIn("root json/ contains no JSON files", extract)
+        self.assertIn("root schemas/ contains no JSON files", extract)
+        self.assertNotIn("SEFARIA_DB_ROOTS", extract)
 
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")

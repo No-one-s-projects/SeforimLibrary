@@ -478,9 +478,6 @@ jobs:
           echo "$java_home/bin" >> "$GITHUB_PATH"
           "$java_home/bin/java" -version
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
@@ -545,11 +542,27 @@ jobs:
           test "$(stat -c %s "$INPUTS/sefaria-archive.tar.zst")" = "$(jq -r .archive.size "$SEFARIA_METADATA")"
           echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf "$INPUTS/sefaria-archive.tar.zst" -C "$INPUTS/sefaria-extract"
-          # The export root is the single directory holding both json/ and schemas/
-          # (the Docker-Compose archives no longer ship a database_export folder).
-          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name schemas -print | sort | while read -r s; do d="$(dirname "$s")"; test -d "$d/json" && printf '%s\n' "$d"; done)
-          test "${#SEFARIA_DB_ROOTS[@]}" -eq 1
-          SEFARIA_EXTRACT_ROOT="${SEFARIA_DB_ROOTS[0]}"
+          # The immutable Sefaria archive contract places json/ and schemas/
+          # directly at its root.  Do not rediscover that root with `find`: a
+          # silent cardinality test made a valid export look corrupt and hid
+          # which invariant had failed.
+          SEFARIA_EXTRACT_ROOT="$INPUTS/sefaria-extract"
+          test -d "$SEFARIA_EXTRACT_ROOT/json" || {
+            echo "::error::pinned Sefaria archive is missing root json/"
+            exit 1
+          }
+          test -d "$SEFARIA_EXTRACT_ROOT/schemas" || {
+            echo "::error::pinned Sefaria archive is missing root schemas/"
+            exit 1
+          }
+          test -n "$(find "$SEFARIA_EXTRACT_ROOT/json" -type f -name '*.json' -print -quit)" || {
+            echo "::error::pinned Sefaria archive root json/ contains no JSON files"
+            exit 1
+          }
+          test -n "$(find "$SEFARIA_EXTRACT_ROOT/schemas" -type f -name '*.json' -print -quit)" || {
+            echo "::error::pinned Sefaria archive root schemas/ contains no JSON files"
+            exit 1
+          }
 
           gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
             --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
