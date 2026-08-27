@@ -571,7 +571,8 @@ jobs:
             --expected-target "$EXPECTED_LINKS_COMMIT" \
             --expected-tag "$OTZARIA_TAG" \
             --expected-asset-sha256 "$OTZARIA_ASSET_SHA"
-          PROVENANCE_DIGEST="$(gh release view "$OTZARIA_TAG" -R otzaria/otzaria-library --json assets \
+          PROVENANCE_DIGEST="$(gh api \
+            "repos/otzaria/otzaria-library/releases/tags/$OTZARIA_TAG" \
             --jq '.assets[] | select(.name=="otzaria_release_provenance.json") | .digest')"
           [[ "$PROVENANCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$(sha256sum "$PROVENANCE" | cut -d' ' -f1)" == "${PROVENANCE_DIGEST#sha256:}" ]]
@@ -579,7 +580,9 @@ jobs:
           test "$(jq -r .asset.sha256 "$PROVENANCE")" = "$OTZARIA_ASSET_SHA"
           OTZARIA_ASSET_NAME=$(jq -r .asset.name "$PROVENANCE")
           test "$(basename "$OTZARIA_ASSET_NAME")" = "$OTZARIA_ASSET_NAME"
-          RELEASE_TARGET=$(gh release view "$OTZARIA_TAG" -R otzaria/otzaria-library --json targetCommitish -q .targetCommitish)
+          RELEASE_TARGET=$(gh api \
+            "repos/otzaria/otzaria-library/releases/tags/$OTZARIA_TAG" \
+            --jq .target_commitish)
           test "$RELEASE_TARGET" = "$OTZARIA_TARGET_COMMIT"
           OTZARIA_TAG_COMMIT=$(gh api "repos/otzaria/otzaria-library/commits/$OTZARIA_TAG" --jq .sha)
           test "$OTZARIA_TAG_COMMIT" = "$OTZARIA_TARGET_COMMIT"
@@ -940,8 +943,9 @@ jobs:
             ' "$PARENT_JSON" >/dev/null || { echo "::error::recovery parent is not the exact failed build attempt for this correlation"; exit 1; }
 
             RECOVERY_OUTPUT_TAG="linker-output-${RELINK_REQUEST_ID}-${RECOVERY_ATTEMPT}"
-            gh release view "$RECOVERY_OUTPUT_TAG" -R Otzaria/LinkerToOtzaria \
-              --json isDraft,isPrerelease,targetCommitish,assets > "$RUNNER_TEMP/relink-recovery-output-release.json"
+            gh api "repos/Otzaria/LinkerToOtzaria/releases/tags/$RECOVERY_OUTPUT_TAG" --jq \
+              '{isDraft:.draft,isPrerelease:.prerelease,targetCommitish:.target_commitish,assets:[.assets[]|{name,size,digest}]}' \
+              > "$RUNNER_TEMP/relink-recovery-output-release.json"
             python3 - "$RUNNER_TEMP/relink-recovery-output-release.json" "$RECOVERY_HEAD" <<'PY'
           import json,sys
           value=json.load(open(sys.argv[1],encoding="utf-8"))
@@ -1160,8 +1164,9 @@ jobs:
             ' "$POINTER" >/dev/null
           gh release download "$LINKER_RELEASE_TAG" -R Otzaria/LinkerToOtzaria \
             -p linker_links.zst -D build/linker
-          REMOTE_PAYLOAD_DIGEST="$(gh release view "$LINKER_RELEASE_TAG" -R Otzaria/LinkerToOtzaria \
-            --json assets --jq '.assets[]|select(.name=="linker_links.zst")|.digest')"
+          REMOTE_PAYLOAD_DIGEST="$(gh api \
+            "repos/Otzaria/LinkerToOtzaria/releases/tags/$LINKER_RELEASE_TAG" \
+            --jq '.assets[]|select(.name=="linker_links.zst")|.digest')"
           [ "$REMOTE_PAYLOAD_DIGEST" = "sha256:$POINTER_PAYLOAD_SHA" ] || {
             echo "::error::Linker pointer differs from final release payload digest"; exit 1;
           }
@@ -1520,10 +1525,14 @@ jobs:
 
           # Upload one asset at a time. If an upload response is lost, reconcile
           # by exact name+size+digest and continue. Never use --clobber.
+          release_assets_json() {
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq \
+              '{assets:[.assets[]|{name,size,digest}]}'
+          }
           asset_state() {
             local asset_path="$1" expected_size="$2" expected_digest="$3"
             local output="$RUNNER_TEMP/release-assets-state.json"
-            gh release view "$RELEASE_TAG" --json assets > "$output" || return 1
+            release_assets_json > "$output" || return 1
             python3 - "$output" "$asset_path" "$expected_size" "$expected_digest" <<'PY'
           import json,sys
           from pathlib import Path
@@ -1593,7 +1602,7 @@ jobs:
           }
           for asset_path in release-staging/*; do upload_asset "$asset_path"; done
           verify_remote() {
-            gh release view "$RELEASE_TAG" --json assets > "$RUNNER_TEMP/release-assets.json"
+            release_assets_json > "$RUNNER_TEMP/release-assets.json"
             python3 - "$RUNNER_TEMP/release-assets.json" release-staging <<'PY'
           import hashlib,json,sys
           from pathlib import Path

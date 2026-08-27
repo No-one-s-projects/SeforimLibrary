@@ -82,6 +82,25 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("root schemas/ contains no JSON files", extract)
         self.assertNotIn("SEFARIA_DB_ROOTS", extract)
 
+    def test_self_hosted_release_digests_are_read_through_rest(self):
+        extract = self.step("Verify pinned lineage and extract exact inputs")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+        publish = self.step("Create draft, verify every uploaded asset, then publish")
+
+        self.assertIn(
+            'repos/otzaria/otzaria-library/releases/tags/$OTZARIA_TAG', extract
+        )
+        self.assertIn(
+            'repos/Otzaria/LinkerToOtzaria/releases/tags/$LINKER_RELEASE_TAG',
+            apply_links,
+        )
+        self.assertIn(
+            'repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG', publish
+        )
+        self.assertIn("release_assets_json", publish)
+        for step in (extract, apply_links, publish):
+            self.assertNotIn("gh release view", step)
+
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")
         self.assertLess(
