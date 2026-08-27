@@ -943,7 +943,7 @@ jobs:
             fi
 
             PARENT_JSON="$RUNNER_TEMP/relink-recovery-parent.json"
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EXPECTED_PARENT_RUN_ID" > "$PARENT_JSON"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EXPECTED_PARENT_RUN_ID/attempts/$EXPECTED_PARENT_RUN_ATTEMPT" > "$PARENT_JSON"
             EXPECTED_PARENT_TITLE="manual-generate-release correlation=$CORRELATION_ID"
             jq -e --argjson attempt "$EXPECTED_PARENT_RUN_ATTEMPT" --arg title "$EXPECTED_PARENT_TITLE" '
               .status == "completed" and .conclusion == "failure" and
@@ -1040,6 +1040,11 @@ jobs:
             local|kaggle|server) ;;
             *) echo "::error::SERIAL_LINKER_TARGET must be 'local', 'kaggle' or 'server', got '$SERIAL_LINKER_TARGET'"; exit 1 ;;
           esac
+          # Cleanup may search by exact title only after THIS attempt reached its
+          # dispatch boundary.  RELINK_REQUEST_ID is computed earlier and can also be
+          # present in an attempt that fails before dispatch; treating that as proof of
+          # ownership let a later GitHub rerun cancel an older attempt's live recovery.
+          echo "RELINK_DISPATCH_STARTED=1" >> "$GITHUB_ENV"
           python3 .pipeline-control/.github/scripts/host_lease.py release --state "$HOST_LEASE_STATE"
           case "$SERIAL_LINKER_TARGET" in
             local)
@@ -1768,7 +1773,11 @@ jobs:
           set -uo pipefail
           # The identity vars exist only if the dispatch step ran (GITHUB_ENV) — before
           # that point there is nothing to clean.
-          [ -n "${RELINK_REQUEST_ID:-}" ] || { echo "relink was never dispatched — nothing to clean."; exit 0; }
+          [ "${RELINK_DISPATCH_STARTED:-}" = 1 ] || {
+            echo "this attempt never reached the relink dispatch boundary — nothing to clean."
+            exit 0
+          }
+          [ -n "${RELINK_REQUEST_ID:-}" ] || { echo "dispatch boundary lacked a request id — nothing to clean."; exit 0; }
           : "${RELINK_TITLE:=}"
           : "${KAGGLE_TITLE:=}"
           export RELINK_TITLE KAGGLE_TITLE

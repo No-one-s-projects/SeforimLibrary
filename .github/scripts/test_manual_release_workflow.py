@@ -143,6 +143,12 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
         cleanup = self.step("Cancel any in-flight relink for this build (no orphaned linker run)")
         self.assertIn('echo "KAGGLE_TITLE=kaggle-relink request=$RELINK_REQUEST_ID', relink)
+        self.assertIn('echo "RELINK_DISPATCH_STARTED=1" >> "$GITHUB_ENV"', relink)
+        self.assertIn('[ "${RELINK_DISPATCH_STARTED:-}" = 1 ]', cleanup)
+        self.assertIn(
+            'actions/runs/$EXPECTED_PARENT_RUN_ID/attempts/$EXPECTED_PARENT_RUN_ATTEMPT',
+            relink,
+        )
         self.assertIn(': "${RELINK_TITLE:=}"', cleanup)
         self.assertIn(': "${KAGGLE_TITLE:=}"', cleanup)
 
