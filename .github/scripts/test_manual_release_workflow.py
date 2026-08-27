@@ -115,11 +115,17 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             self.workflow.index("      - name: Preflight release write credentials\n"),
             self.workflow.index("      - name: Mount RAM-backed build dir (tmpfs)\n"),
         )
-        self.assertIn("[ \"$code\" = 422 ]", probe)
+        self.assertIn("[ \"$code\" = 200 ]", probe)
+        self.assertIn(".permissions.push == true", probe)
+        self.assertNotIn("--request POST", probe)
         self.assertIn("RELEASE_AUTOMATIC_WRITABLE", probe)
         self.assertIn("RELEASE_CROSS_REPO_WRITABLE", probe)
         self.assertIn("RELEASE_TOKEN_KIND=automatic", probe)
         self.assertIn("RELEASE_TOKEN_KIND=cross-repo", probe)
+        self.assertLess(
+            probe.index('if [ "$cross_repo_writable" = true ]'),
+            probe.index('elif [ "$automatic_writable" = true ]'),
+        )
 
     def test_publisher_reconciles_and_falls_back_only_to_preflighted_credentials(self):
         publish = self.step("Create draft, verify every uploaded asset, then publish")
