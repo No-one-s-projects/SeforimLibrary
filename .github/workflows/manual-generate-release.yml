@@ -1279,7 +1279,7 @@ jobs:
         run: |
           gradle :generator-common:compactContent \
             -PdbPath=$PWD/build/seforim.db \
-            -PcontentZstdLevel=9 \
+            -PcontentZstdLevel=19 \
             --no-daemon --stacktrace
 
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────

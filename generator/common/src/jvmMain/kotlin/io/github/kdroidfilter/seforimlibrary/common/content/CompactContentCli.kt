@@ -11,7 +11,7 @@ fun main() {
     Logger.setMinSeverity(Severity.Info)
     val logger = Logger.withTag("CompactContent")
     val path = Paths.get(System.getProperty("dbPath") ?: error("-PdbPath= missing"))
-    val level = (System.getProperty("contentZstdLevel") ?: "9").toInt().coerceIn(1, 22)
+    val level = (System.getProperty("contentZstdLevel") ?: "19").toInt().coerceIn(1, 22)
     require(Files.isRegularFile(path)) { "Database file not found: $path" }
     val before = Files.size(path)
 
