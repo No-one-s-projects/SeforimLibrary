@@ -128,6 +128,19 @@ tasks.register<JavaExec>("stampSchemaVersion") {
     jvmArgs = listOf("-Xmx512m")
 }
 
+tasks.register<JavaExec>("compactContent") {
+    group = "application"
+    description = "Pack line and edition text into per-book Zstd blobs and vacuum seforim.db."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.content.CompactContentCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = project.findProperty("dbPath") as String?
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    project.findProperty("contentZstdLevel")?.let { systemProperty("contentZstdLevel", it as String) }
+    jvmArgs = listOf("-Xmx2g", "-XX:+UseG1GC")
+}
+
 tasks.register<JavaExec>("diagnoseHashMismatch") {
     group = "verification"
     description = "Apply a patch.db onto a copy of prevDb and report which tables hash-differ from newDb."

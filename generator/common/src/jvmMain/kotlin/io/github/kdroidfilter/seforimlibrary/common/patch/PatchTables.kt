@@ -44,6 +44,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
 
     // Book — depends on category + source.
     PatchTable("book",               listOf("id"),       updatable = true),
+    PatchTable("book_content",       listOf("bookId"),   updatable = true),
 
     // Book-attribute junctions — depend on book + author/topic/pubPlace/pubDate/generation.
     PatchTable("book_author",        listOf("bookId", "authorId"),       updatable = false),
@@ -70,6 +71,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // Book editions — book_version depends on book, version_line on it + line.
     PatchTable("book_version",       listOf("id"),       updatable = true),
     PatchTable("version_line",       listOf("versionId", "lineId"), updatable = true),
+    PatchTable("version_content",    listOf("versionId"), updatable = true),
 
     // Alternative TOCs.
     PatchTable("alt_toc_structure",  listOf("id"),       updatable = true),

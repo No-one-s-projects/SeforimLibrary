@@ -288,6 +288,18 @@ CREATE INDEX IF NOT EXISTS idx_line_book_index ON line(bookId, lineIndex);
 CREATE INDEX IF NOT EXISTS idx_line_toc ON line(tocEntryId);
 CREATE INDEX IF NOT EXISTS idx_line_heref ON line(heRef);
 
+-- Compact release storage. `contentZstd` is one independently compressed book:
+-- repeated little-endian uint32 byte length followed by UTF-8 bytes, in lineIndex order.
+-- line.content remains in the schema for metadata compatibility and is empty in compact releases.
+CREATE TABLE IF NOT EXISTS book_content (
+    bookId INTEGER PRIMARY KEY NOT NULL,
+    format INTEGER NOT NULL DEFAULT 1,
+    contentZstd BLOB NOT NULL,
+    uncompressedSize INTEGER NOT NULL,
+    contentHash BLOB NOT NULL,
+    FOREIGN KEY (bookId) REFERENCES book(id) ON DELETE CASCADE
+);
+
 -- TOC texts table
 CREATE TABLE IF NOT EXISTS tocText (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -472,6 +484,17 @@ CREATE TABLE IF NOT EXISTS version_line (
 );
 
 CREATE INDEX IF NOT EXISTS idx_version_line_line ON version_line(lineId);
+
+-- Compact alternate-edition storage. Each decompressed record is a little-endian
+-- int64 lineId, uint32 UTF-8 byte length, then the content bytes.
+CREATE TABLE IF NOT EXISTS version_content (
+    versionId INTEGER PRIMARY KEY NOT NULL,
+    format INTEGER NOT NULL DEFAULT 1,
+    contentZstd BLOB NOT NULL,
+    uncompressedSize INTEGER NOT NULL,
+    contentHash BLOB NOT NULL,
+    FOREIGN KEY (versionId) REFERENCES book_version(id) ON DELETE CASCADE
+);
 
 -- Mapping table: line -> owning TOC entry
 -- This denormalizes the relationship so every line can directly resolve
