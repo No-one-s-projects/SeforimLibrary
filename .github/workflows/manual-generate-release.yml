@@ -1273,6 +1273,15 @@ jobs:
             --metrics build/seforim.db.link-import-metrics.json \
             --require-all
 
+      # Search/link generation and QA need ordinary line text. Only the release
+      # database is compacted, after those consumers finish and before deltas.
+      - name: Compact text storage (per-book Zstd)
+        run: |
+          gradle :generator-common:compactContent \
+            -PdbPath=$PWD/build/seforim.db \
+            -PcontentZstdLevel=9 \
+            --no-daemon --stacktrace
+
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
       # Each iteration downloads + decompresses, runs the producer, then
