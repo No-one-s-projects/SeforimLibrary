@@ -6,6 +6,14 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import java.sql.Connection
 import java.sql.DriverManager
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+
+/// Zstd compression is CPU-bound and independent per book/edition; only the
+/// SQLite writes need to stay serialized. Reads+encode happen a chunk at a
+/// time (bounds how much raw text sits in memory), compression within a
+/// chunk runs across all cores, then that chunk's writes commit sequentially.
+private val PARALLELISM = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
 
 fun main() {
     Logger.setMinSeverity(Severity.Info)
@@ -57,33 +65,46 @@ private fun compactBooks(conn: Connection, level: Int, logger: Logger): Pair<Int
     val ids = queryLongs(conn, "SELECT id FROM book ORDER BY id")
     var count = 0
     var skipped = 0
-    for (bookId in ids) {
-        if (hasRow(conn, "book_content", "bookId", bookId)) continue
-        try {
-            val lines = ArrayList<String>()
-            var expectedIndex = 0
-            conn.prepareStatement("SELECT lineIndex, content FROM line WHERE bookId=? ORDER BY lineIndex").use { ps ->
-                ps.setLong(1, bookId)
-                ps.executeQuery().use { rs ->
-                    while (rs.next()) {
-                        require(rs.getInt(1) == expectedIndex++) { "Non-contiguous lineIndex in book $bookId" }
-                        lines += rs.getString(2)
+    val pool = Executors.newFixedThreadPool(PARALLELISM)
+    try {
+        for (chunk in ids.chunked(PARALLELISM * 4)) {
+            val prepared = ArrayList<Pair<Long, ByteArray>>(chunk.size)
+            for (bookId in chunk) {
+                if (hasRow(conn, "book_content", "bookId", bookId)) continue
+                try {
+                    val lines = ArrayList<String>()
+                    var expectedIndex = 0
+                    conn.prepareStatement("SELECT lineIndex, content FROM line WHERE bookId=? ORDER BY lineIndex").use { ps ->
+                        ps.setLong(1, bookId)
+                        ps.executeQuery().use { rs ->
+                            while (rs.next()) {
+                                require(rs.getInt(1) == expectedIndex++) { "Non-contiguous lineIndex in book $bookId" }
+                                lines += rs.getString(2)
+                            }
+                        }
+                    }
+                    prepared += bookId to CompactContent.encodeBook(lines)
+                } catch (e: IllegalArgumentException) {
+                    logger.w { "Skipping book $bookId: ${e.message}" }
+                    skipped++
+                }
+            }
+            if (prepared.isEmpty()) continue
+            val compressedById = pool.invokeAll(prepared.map { (id, payload) ->
+                Callable { id to CompactContent.compress(payload, level) }
+            }).associate { it.get() }
+            for ((bookId, payload) in prepared) {
+                transaction(conn) {
+                    insertContent(conn, "book_content", "bookId", bookId, compressedById.getValue(bookId), payload)
+                    conn.prepareStatement("UPDATE line SET content='' WHERE bookId=?").use {
+                        it.setLong(1, bookId); it.executeUpdate()
                     }
                 }
+                count++
             }
-            val payload = CompactContent.encodeBook(lines)
-            val compressed = CompactContent.compress(payload, level)
-            transaction(conn) {
-                insertContent(conn, "book_content", "bookId", bookId, compressed, payload)
-                conn.prepareStatement("UPDATE line SET content='' WHERE bookId=?").use {
-                    it.setLong(1, bookId); it.executeUpdate()
-                }
-            }
-            count++
-        } catch (e: IllegalArgumentException) {
-            logger.w { "Skipping book $bookId: ${e.message}" }
-            skipped++
         }
+    } finally {
+        pool.shutdown()
     }
     return count to skipped
 }
@@ -92,27 +113,40 @@ private fun compactVersions(conn: Connection, level: Int, logger: Logger): Pair<
     val ids = queryLongs(conn, "SELECT DISTINCT versionId FROM version_line ORDER BY versionId")
     var count = 0
     var skipped = 0
-    for (versionId in ids) {
-        if (hasRow(conn, "version_content", "versionId", versionId)) continue
-        try {
-            val lines = ArrayList<Pair<Long, String>>()
-            conn.prepareStatement("SELECT lineId, content FROM version_line WHERE versionId=? ORDER BY lineId").use { ps ->
-                ps.setLong(1, versionId)
-                ps.executeQuery().use { rs -> while (rs.next()) lines += rs.getLong(1) to rs.getString(2) }
-            }
-            val payload = CompactContent.encodeVersion(lines)
-            val compressed = CompactContent.compress(payload, level)
-            transaction(conn) {
-                insertContent(conn, "version_content", "versionId", versionId, compressed, payload)
-                conn.prepareStatement("UPDATE version_line SET content='' WHERE versionId=?").use {
-                    it.setLong(1, versionId); it.executeUpdate()
+    val pool = Executors.newFixedThreadPool(PARALLELISM)
+    try {
+        for (chunk in ids.chunked(PARALLELISM * 4)) {
+            val prepared = ArrayList<Pair<Long, ByteArray>>(chunk.size)
+            for (versionId in chunk) {
+                if (hasRow(conn, "version_content", "versionId", versionId)) continue
+                try {
+                    val lines = ArrayList<Pair<Long, String>>()
+                    conn.prepareStatement("SELECT lineId, content FROM version_line WHERE versionId=? ORDER BY lineId").use { ps ->
+                        ps.setLong(1, versionId)
+                        ps.executeQuery().use { rs -> while (rs.next()) lines += rs.getLong(1) to rs.getString(2) }
+                    }
+                    prepared += versionId to CompactContent.encodeVersion(lines)
+                } catch (e: IllegalArgumentException) {
+                    logger.w { "Skipping edition $versionId: ${e.message}" }
+                    skipped++
                 }
             }
-            count++
-        } catch (e: IllegalArgumentException) {
-            logger.w { "Skipping edition $versionId: ${e.message}" }
-            skipped++
+            if (prepared.isEmpty()) continue
+            val compressedById = pool.invokeAll(prepared.map { (id, payload) ->
+                Callable { id to CompactContent.compress(payload, level) }
+            }).associate { it.get() }
+            for ((versionId, payload) in prepared) {
+                transaction(conn) {
+                    insertContent(conn, "version_content", "versionId", versionId, compressedById.getValue(versionId), payload)
+                    conn.prepareStatement("UPDATE version_line SET content='' WHERE versionId=?").use {
+                        it.setLong(1, versionId); it.executeUpdate()
+                    }
+                }
+                count++
+            }
         }
+    } finally {
+        pool.shutdown()
     }
     return count to skipped
 }
