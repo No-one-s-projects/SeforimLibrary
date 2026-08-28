@@ -16,25 +16,35 @@ fun main() {
     val before = Files.size(path)
 
     Class.forName("org.sqlite.JDBC")
-    DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
-        conn.createStatement().use { it.execute("PRAGMA foreign_keys=ON") }
-        CompactContent.ensureSchema(conn)
-        val (books, skippedBooks) = compactBooks(conn, level, logger)
-        val (versions, skippedVersions) = compactVersions(conn, level, logger)
-        verifyAll(conn)
-        if (skippedBooks > 0 || skippedVersions > 0) {
-            logger.w {
-                "Skipped $skippedBooks book(s) and $skippedVersions edition(s) with malformed " +
-                    "line data - left in legacy (uncompacted) storage, see warnings above"
+    val (books, versions, skippedBooks, skippedVersions) =
+        DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { it.execute("PRAGMA foreign_keys=ON") }
+            CompactContent.ensureSchema(conn)
+            val (books, skippedBooks) = compactBooks(conn, level, logger)
+            val (versions, skippedVersions) = compactVersions(conn, level, logger)
+            verifyAll(conn)
+            conn.createStatement().use {
+                it.executeUpdate("INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('content_storage_format','1')")
+                it.executeUpdate("INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('db_schema_version','3')")
             }
+            listOf(books, versions, skippedBooks, skippedVersions)
         }
-        conn.createStatement().use {
-            it.executeUpdate("INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('content_storage_format','1')")
-            it.executeUpdate("INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('db_schema_version','3')")
-            it.execute("VACUUM")
-        }
-        logger.i { "Compacted $books books and $versions editions at Zstd level $level" }
+
+    // VACUUM needs a connection with no prior statement history - after tens of
+    // thousands of prepared statements over one connection, sqlite-jdbc can still
+    // consider some "in progress" even though every one was individually closed.
+    // A fresh connection sidesteps that instead of chasing the leak.
+    DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
+        conn.createStatement().use { it.execute("VACUUM") }
     }
+
+    if (skippedBooks > 0 || skippedVersions > 0) {
+        logger.w {
+            "Skipped $skippedBooks book(s) and $skippedVersions edition(s) with malformed " +
+                "line data - left in legacy (uncompacted) storage, see warnings above"
+        }
+    }
+    logger.i { "Compacted $books books and $versions editions at Zstd level $level" }
 
     val after = Files.size(path)
     logger.i { "Database: ${humanSize(before)} -> ${humanSize(after)} (${"%.1f".format(after * 100.0 / before)}%)" }
