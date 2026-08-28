@@ -51,3 +51,15 @@ jobs:
           echo "compacted seforim.db size: $SIZE bytes ($(numfmt --to=iec-i --suffix=B $SIZE))"
           echo "### Level-19 compaction result" >> "$GITHUB_STEP_SUMMARY"
           echo "seforim.db: $SIZE bytes ($(numfmt --to=iec-i --suffix=B $SIZE))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package compacted db for download
+        run: |
+          zstd -9 -T0 -f seforim.db -o seforim.db.zst
+          ls -la seforim.db.zst
+          echo "outer-wrapped size: $(stat -c%s seforim.db.zst) bytes ($(numfmt --to=iec-i --suffix=B $(stat -c%s seforim.db.zst)))" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seforim-compacted-level19
+          path: seforim.db.zst
+          retention-days: 3
