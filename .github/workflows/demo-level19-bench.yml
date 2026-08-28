@@ -1,0 +1,53 @@
+name: demo - level 19 compaction real-size bench
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Download real production seforim.db.zst
+        run: |
+          gh release download v22-20260821152805 --repo Otzaria/SeforimLibrary --pattern seforim.db.zst
+          ls -la seforim.db.zst
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Decompress
+        run: |
+          zstd -d --long=31 -f seforim.db.zst -o seforim.db
+          rm seforim.db.zst
+          ls -la seforim.db
+          df -h /
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run compactContent at level 19
+        run: |
+          ./gradlew :generator-common:compactContent \
+            -PdbPath=$PWD/seforim.db \
+            -PcontentZstdLevel=19 \
+            --no-daemon --stacktrace
+
+      - name: Report real size
+        run: |
+          SIZE=$(stat -c%s seforim.db)
+          echo "compacted seforim.db size: $SIZE bytes ($(numfmt --to=iec-i --suffix=B $SIZE))"
+          echo "### Level-19 compaction result" >> "$GITHUB_STEP_SUMMARY"
+          echo "seforim.db: $SIZE bytes ($(numfmt --to=iec-i --suffix=B $SIZE))" >> "$GITHUB_STEP_SUMMARY"
