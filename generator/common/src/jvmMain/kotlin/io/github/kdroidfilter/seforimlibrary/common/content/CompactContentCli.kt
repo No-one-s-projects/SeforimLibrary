@@ -19,9 +19,15 @@ fun main() {
     DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
         conn.createStatement().use { it.execute("PRAGMA foreign_keys=ON") }
         CompactContent.ensureSchema(conn)
-        val books = compactBooks(conn, level)
-        val versions = compactVersions(conn, level)
+        val (books, skippedBooks) = compactBooks(conn, level, logger)
+        val (versions, skippedVersions) = compactVersions(conn, level, logger)
         verifyAll(conn)
+        if (skippedBooks > 0 || skippedVersions > 0) {
+            logger.w {
+                "Skipped $skippedBooks book(s) and $skippedVersions edition(s) with malformed " +
+                    "line data - left in legacy (uncompacted) storage, see warnings above"
+            }
+        }
         conn.createStatement().use {
             it.executeUpdate("INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('content_storage_format','1')")
             it.executeUpdate("INSERT OR REPLACE INTO schema_meta(key,value) VALUES ('db_schema_version','3')")
@@ -34,56 +40,71 @@ fun main() {
     logger.i { "Database: ${humanSize(before)} -> ${humanSize(after)} (${"%.1f".format(after * 100.0 / before)}%)" }
 }
 
-private fun compactBooks(conn: Connection, level: Int): Int {
+/// One malformed book must not abort compaction of the other thousands - a
+/// book that fails encoding is skipped (logged) and stays in legacy
+/// (uncompacted) [line.content], which the reader already falls back to.
+private fun compactBooks(conn: Connection, level: Int, logger: Logger): Pair<Int, Int> {
     val ids = queryLongs(conn, "SELECT id FROM book ORDER BY id")
     var count = 0
+    var skipped = 0
     for (bookId in ids) {
         if (hasRow(conn, "book_content", "bookId", bookId)) continue
-        val lines = ArrayList<String>()
-        var expectedIndex = 0
-        conn.prepareStatement("SELECT lineIndex, content FROM line WHERE bookId=? ORDER BY lineIndex").use { ps ->
-            ps.setLong(1, bookId)
-            ps.executeQuery().use { rs ->
-                while (rs.next()) {
-                    require(rs.getInt(1) == expectedIndex++) { "Non-contiguous lineIndex in book $bookId" }
-                    lines += rs.getString(2)
+        try {
+            val lines = ArrayList<String>()
+            var expectedIndex = 0
+            conn.prepareStatement("SELECT lineIndex, content FROM line WHERE bookId=? ORDER BY lineIndex").use { ps ->
+                ps.setLong(1, bookId)
+                ps.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        require(rs.getInt(1) == expectedIndex++) { "Non-contiguous lineIndex in book $bookId" }
+                        lines += rs.getString(2)
+                    }
                 }
             }
-        }
-        val payload = CompactContent.encodeBook(lines)
-        val compressed = CompactContent.compress(payload, level)
-        transaction(conn) {
-            insertContent(conn, "book_content", "bookId", bookId, compressed, payload)
-            conn.prepareStatement("UPDATE line SET content='' WHERE bookId=?").use {
-                it.setLong(1, bookId); it.executeUpdate()
+            val payload = CompactContent.encodeBook(lines)
+            val compressed = CompactContent.compress(payload, level)
+            transaction(conn) {
+                insertContent(conn, "book_content", "bookId", bookId, compressed, payload)
+                conn.prepareStatement("UPDATE line SET content='' WHERE bookId=?").use {
+                    it.setLong(1, bookId); it.executeUpdate()
+                }
             }
+            count++
+        } catch (e: IllegalArgumentException) {
+            logger.w { "Skipping book $bookId: ${e.message}" }
+            skipped++
         }
-        count++
     }
-    return count
+    return count to skipped
 }
 
-private fun compactVersions(conn: Connection, level: Int): Int {
+private fun compactVersions(conn: Connection, level: Int, logger: Logger): Pair<Int, Int> {
     val ids = queryLongs(conn, "SELECT DISTINCT versionId FROM version_line ORDER BY versionId")
     var count = 0
+    var skipped = 0
     for (versionId in ids) {
         if (hasRow(conn, "version_content", "versionId", versionId)) continue
-        val lines = ArrayList<Pair<Long, String>>()
-        conn.prepareStatement("SELECT lineId, content FROM version_line WHERE versionId=? ORDER BY lineId").use { ps ->
-            ps.setLong(1, versionId)
-            ps.executeQuery().use { rs -> while (rs.next()) lines += rs.getLong(1) to rs.getString(2) }
-        }
-        val payload = CompactContent.encodeVersion(lines)
-        val compressed = CompactContent.compress(payload, level)
-        transaction(conn) {
-            insertContent(conn, "version_content", "versionId", versionId, compressed, payload)
-            conn.prepareStatement("UPDATE version_line SET content='' WHERE versionId=?").use {
-                it.setLong(1, versionId); it.executeUpdate()
+        try {
+            val lines = ArrayList<Pair<Long, String>>()
+            conn.prepareStatement("SELECT lineId, content FROM version_line WHERE versionId=? ORDER BY lineId").use { ps ->
+                ps.setLong(1, versionId)
+                ps.executeQuery().use { rs -> while (rs.next()) lines += rs.getLong(1) to rs.getString(2) }
             }
+            val payload = CompactContent.encodeVersion(lines)
+            val compressed = CompactContent.compress(payload, level)
+            transaction(conn) {
+                insertContent(conn, "version_content", "versionId", versionId, compressed, payload)
+                conn.prepareStatement("UPDATE version_line SET content='' WHERE versionId=?").use {
+                    it.setLong(1, versionId); it.executeUpdate()
+                }
+            }
+            count++
+        } catch (e: IllegalArgumentException) {
+            logger.w { "Skipping edition $versionId: ${e.message}" }
+            skipped++
         }
-        count++
     }
-    return count
+    return count to skipped
 }
 
 private fun verifyAll(conn: Connection) {
